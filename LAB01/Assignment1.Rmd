@@ -1,0 +1,311 @@
+---
+title: "ASSIGNMENT1"
+author: "Lakhvinder Singh"
+date: "2026-02-18"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r} 
+library(tidyverse)
+library(sf) #Loading the packages
+
+```
+```{r}
+p.counties <-"./CBW/County_Boundaries.shp"
+p.stations <-"./CBW/Non-Tidal_Water_Quality_Monitoring_Stations_in_the_Chesapeake_Bay.shp"
+```
+
+```{r}
+d.stations <- sf::read_sf(p.stations)
+d.counties <- sf::read_sf(p.counties)
+```
+
+```{r}
+glimpse(d.counties)
+glimpse(d.stations)
+```
+
+```{r}
+# check for validity
+d.stations %>% sf::st_is_valid()
+d.counties %>% sf::st_is_valid() # returns false for one feature, so we need to fix
+
+```
+```{r}
+# fix it "in place"
+d.counties <- d.counties %>% sf::st_make_valid()
+
+```
+
+```{r}
+d.counties %>% dplyr::select(GEOID10, ALAND10) %>% head()
+```
+
+```{r}
+d.counties %>% dplyr::select(-NAME10) %>% head()
+```
+```{r}
+d.counties %>% dplyr::select(GEOID10:CLASSFP10) %>% head() 
+
+d.counties %>% dplyr::select(-(GEOID10:CLASSFP10)) %>% head() 
+
+d.counties %>% dplyr::select(starts_with("C"))
+```
+
+```{r}
+d.counties %>% group_by(STATEFP10) %>% mutate(stateLandArea = sum(ALAND10))
+```
+
+```{r}
+d.counties %>% 
+  as_tibble() %>% dplyr::select(-geometry) %>% # this line converts the data because of wonky geometry
+  group_by(STATEFP10) %>% 
+  summarise(stateLandArea = sum(ALAND10))
+```
+
+```{r}
+d.counties %>% 
+  ggplot(., aes(x = as.factor(STATEFP10), y = ALAND10)) +
+  geom_boxplot(aes(fill = STATEFP10))
+```
+```{r}
+d.counties %>% 
+  ggplot(., aes(x = ALAND10)) +
+  geom_histogram(aes(fill = STATEFP10)) +
+  labs(title = "not the most useful plot, but you get the idea")
+```
+```{r}
+d.counties %>% sf::st_crs()
+d.stations %>% sf::st_crs()
+```
+
+```{r}
+d.counties %>% sf::st_crs() == d.stations %>% sf::st_crs()
+```
+
+```{r}
+del.counties <- d.counties %>% dplyr::filter(STATEFP10 == 10)
+```
+
+```{r}
+del.stations <- sf::st_intersection(d.stations, del.counties)
+```
+
+```{r}
+glimpse(del.stations)
+plot(del.stations)
+```
+
+```{r}
+del.counties %>% st_area() 
+```
+
+```{r}
+#TASK 1 (Manipulation of Data)
+#1.1 For each county, calculate its land area as percentage of the total area (land + water) for that state.
+
+d.counties %>%
+  group_by(STATEFP10) %>%
+  mutate(
+    state_total_area = sum(ALAND10 + AWATER10),
+    county_percent_of_state = (ALAND10 / state_total_area) * 100
+  ) %>% ungroup()
+
+
+```
+```{r}
+#1.2 For each state, find the county that has the largest proportion of its land as water (water area / total area)
+
+task_1.2 <- d.counties %>%
+  mutate(prop_water = AWATER10 / (ALAND10 + AWATER10)) %>%
+  group_by(STATEFP10) %>%
+  slice_max(prop_water, n = 1) %>%
+  select(STATEFP10, NAME10, prop_water)
+
+```
+
+```{r}
+#1.3 Count the number of counties in each state (MISSED #, got error)
+task_1.3 <- d.counties %>%
+  as_tibble() %>%
+  group_by(STATEFP10) %>%
+  summarise(county_count = n())
+```
+
+```{r}
+#1.4 Which station has the shortest name (`STATION_NA`) in the study area?
+
+#Usin nchar() which will help in identifying the number of characters
+task_1.4 <- d.stations %>%
+  mutate(name_length = nchar(as.character(STATION_NA))) %>%
+  filter(name_length == min(name_length, na.rm = TRUE)) %>%
+  select(STATION_NA, name_length)
+
+# Print the result
+task_1.4 %>% sf::st_drop_geometry()
+
+```
+
+```{r} 
+#TASK 2
+#2.1 Make a scatterplot showing the relationship between land area and water area for each county. Color each point using the state variable
+
+# We can use geom_point() for the scatterplot and aes(color = ...) to distinguish states
+ggplot(d.counties, aes(x = ALAND10, y = AWATER10, color = as.factor(STATEFP10))) +
+  geom_point(alpha = 0.6) +
+  labs(title = "Relationship between Land Area and Water Area by County",
+       x = "Land Area (ALAND10)",
+       y = "Water Area (AWATER10)",
+       color = "State FIPS") +
+  theme_minimal()
+
+```
+
+```{r}
+#2.2 Make a histogram of drainage area (`Drainage_A`) for all monitoring stations
+
+ggplot(d.stations, aes(x = Drainage_A)) +
+  geom_histogram(bins = 30, fill = "blue", color = "white") +
+  labs(title = "Distribution of Drainage Area across Monitoring Stations",
+       x = "Drainage Area",
+       y = "Frequency") +
+  theme_minimal()
+
+```
+
+```{r}
+#2.3 Make a similar histogram of drainage area (`Drainage_A`) for all monitoring stations. This time, shade/color each portion of the histogram's bar(s) using the state variable
+
+# We use st_join which performs a spatial intersection automatically
+d.stations_with_state <- sf::st_join(d.stations, d.counties %>% dplyr::select(STATEFP10))
+
+# Now we can plot using STATEFP10 for the fill
+ggplot(d.stations_with_state, aes(x = Drainage_A, fill = as.factor(STATEFP10))) + 
+  geom_histogram(bins = 30, color = "white") +
+  labs(title = "Drainage Area Distribution by State",
+       x = "Drainage Area",
+       y = "Frequency",
+       fill = "State FIPS") +
+  theme_minimal()
+
+```
+```{r}
+### Task 3: Write a function
+
+# 3.1 Define the function
+analyze_vector <- function(vec) {
+  
+  # D. Check for numeric values and print error if not
+  if (!is.numeric(vec)) {
+    stop("Error: The input must be a numeric vector.")
+  }
+  
+# A. Calculate mean, median, maximum, and minimum
+  v_stats <- list(
+    Mean = mean(vec, na.rm = TRUE),
+    Median = median(vec, na.rm = TRUE),
+    Max = max(vec, na.rm = TRUE),
+    Min = min(vec, na.rm = TRUE)
+  )
+  
+# B. Sort the vector
+  v_sorted <- sort(vec)
+  
+# C. Return a list of values from A and the sorted vector from B
+  return(list(Statistics = v_stats, Sorted_Vector = v_sorted))
+}
+
+
+# Running one by one to verify the function:
+
+analyze_vector(c(1, 0, -1))
+analyze_vector(c(10, 1000, 100))
+analyze_vector(c(.1, .001, 1e8))
+analyze_vector(c("a", "b", "c"))
+  
+```
+```{r}
+###TASK 4
+
+# 4.1 calculate the number of monitoring stations in each state
+# Spatially join monitoring stations to counties
+stations_with_state <- sf::st_join(d.stations, d.counties)
+
+# Counting number of stations per state
+stations_per_state <- stations_with_state %>%
+  dplyr::group_by(STATEFP10) %>%
+  dplyr::summarise(
+    n_stations = dplyr::n()
+  )
+
+stations_per_state
+
+```
+
+```{r}
+# 4.2 calculate the Average size of counties in New York (that are also in this study area)
+
+# Filter counties belonging to New York (STATEFP10 = "36")
+ny_counties <- d.counties %>%
+  dplyr::filter(STATEFP10 == "36")
+
+# Calculate county area and average size
+avg_ny_county_area <- ny_counties %>%
+  dplyr::mutate(
+    land_area = sf::st_area(.)
+  ) %>%
+  dplyr::summarise(
+    mean_land_area = mean(land_area)
+  )
+
+avg_ny_county_area
+```
+```{r}
+# 4.3 Calculate which State has monitoring stations with the greatest average drainage area (Drainage_A)
+
+# Calculate average drainage area per state
+avg_drainage_by_state <- stations_with_state %>%
+  dplyr::group_by(STATEFP10) %>%
+  dplyr::summarise(
+    mean_drainage_area = mean(Drainage_A, na.rm = TRUE)
+  )
+
+#state with the maximum average drainage area
+max_avg_drainage_state <- avg_drainage_by_state %>%
+  dplyr::arrange(desc(mean_drainage_area)) %>%
+  dplyr::slice(1)
+
+max_avg_drainage_state
+```
+```{r}
+###QUESTIONS
+
+#QUESTION 1
+# NO. The order of the inputs matters because the output geometry is mainly determined by the first argument. When d.stations is first, the result contains point geometries. When del.counties is first, the result contains polygon geometries.
+
+#The attribute data also differs, since the output keeps the attributes of the first dataset and adds matching attributes from the second, resulting in different tables depending on the order.
+
+#If using two polygons (e.g., habitat overlaps), the order still dictates which dataset's attributes lead the resulting data frame.
+
+```
+
+```{r}
+#QUESTION 2
+
+#my first hurdle was fixing the relative path. Thanks to Hana esber. She made it easy. Additionally, Figuring out how to "tag" the stations with state information was the trickiest part. Since the station file didn't actually say which state it was in, using st_join to pull that data from the counties was a bit tricky. Everything was new. Seeing how the spatial data can be manipulated just like a spreadsheet using tidyverse was cool and new. 
+```
+
+```{r}
+#QUESTION 3
+
+#moving beyond histograms to look at more complex relationships between spatial variables. Will be fun to some interactive maps. 
+```
+
