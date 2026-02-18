@@ -306,6 +306,6 @@ max_avg_drainage_state
 ```{r}
 #QUESTION 3
 
-#moving beyond histograms to look at more complex relationships between spatial variables. Will be fun to some interactive maps. 
+#moving beyond histograms to look at more complex relationships between spatial variables. Will be fun do to some interactive maps. 
 ```
 
