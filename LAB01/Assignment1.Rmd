@@ -3,8 +3,8 @@ title: "ASSIGNMENT1"
 author: "Lakhvinder Singh"
 date: "2026-02-18"
 output:
-  pdf_document: default
   html_document: default
+  pdf_document: default
 ---
 
 ```{r setup, include=FALSE}
@@ -229,7 +229,8 @@ analyze_vector <- function(vec) {
 analyze_vector(c(1, 0, -1))
 analyze_vector(c(10, 1000, 100))
 analyze_vector(c(.1, .001, 1e8))
-analyze_vector(c("a", "b", "c"))
+try(analyze_vector(c("a", "b", "c")))
+
   
 ```
 ```{r}
@@ -306,6 +307,6 @@ max_avg_drainage_state
 ```{r}
 #QUESTION 3
 
-#moving beyond histograms to look at more complex relationships between spatial variables. Will be fun do to some interactive maps. 
+#moving beyond histograms to look at more complex relationships between spatial variables. Will be fun to do some interactive maps. 
 ```
 
