@@ -2,7 +2,9 @@
 title: "Lab 02"
 author: "Lakhvinder Singh"
 date: "03.03.2026"
-output: html_document
+output:
+  pdf_document: default
+  html_document: default
 ---
 
 # Lab 02: R as a GIS
