@@ -1,7 +1,7 @@
 ---
 title: "Lab 02"
 author: "Lakhvinder Singh"
-date: "03.03.2026"
+date: "03.04.2026"
 output:
   pdf_document: default
   html_document: default
@@ -322,7 +322,7 @@ ggplot(cty_join, aes(dam_n, bmp_cost, color = factor(dam_n))) +
     color = "Dams Removed",
     title = "Dam Removals vs BMP Investment by County"
   ) +
-  theme_minimal()
+  theme_minimal() #Makes the plot look clean 
 
 ```
 
@@ -383,7 +383,8 @@ tm_shape(counties_map) +
     "total_cost_m",
     palette = "Blues",
     style = "quantile",
-    title = "Total BMP Cost ($ millions)"
+    title = "Total BMP Cost ($ millions)",
+    lwd = 0.5 #used lwd for making boundaries thin and look clean 
   ) +
   tm_layout(
     main.title = "BMP Investment by County",
