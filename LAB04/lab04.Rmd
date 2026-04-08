@@ -1,7 +1,7 @@
 ---
 title: "Lab 04"
-#author: "Lakhvinder Singh"
-#date: "03.02.2026"
+author: "Lakhvinder Singh"
+date: "04.08.2026"
 output: pdf_document
 my_subtitle: "Env Analysis in R"
 fancy: true
@@ -194,22 +194,16 @@ Test your function. What is the range of CI values in the transformed raster? Do
 
 **Q1.1** What does the CRS of these rasters tell you about how distances and areas are measured? Would you need to reproject before calculating bloom area in square kilometers?
 
-```{r}
-#1.1 The CRS of these rasters is WGS 84 / UTM zone 17N. UTM is a projected coordinate system, which means it flattens the 3D earth onto a 2D grid. Its linear unit of measurement is the meter. This tells you that distances and areas are measured in flat meters.Because the raster is already in a projected coordinate system measured in meters, you do not need to reproject it before calculating area.I would simply calculate the area in square meters and mathematically convert it to square kilometers. 
-```
+Answer 1.1 The CRS of these rasters is WGS 84 / UTM zone 17N. UTM is a projected coordinate system, which means it flattens the 3D earth onto a 2D grid. Its linear unit of measurement is the meter. This tells you that distances and areas are measured in flat meters.Because the raster is already in a projected coordinate system measured in meters, you do not need to reproject it before calculating area.I would simply calculate the area in square meters and mathematically convert it to square kilometers. 
 
 
 **Q1.2** Why is it important to remove sentinel values *before* applying the DN-to-CI transform — rather than after? What would happen to a land pixel (value = 252) if you transformed it without cleaning first?
 
-```{r}
-#1.2 I assume it all comes down to the math. Sentinel values (here like 252 for land) are just arbitrary numeric codes used to label non-data pixels; they aren't real physical measurements. If you apply the mathematical transformation formula before removing them, R will blindly plug the number "252" into the equation. You would accidentally calculate a fake, valid-looking cyanobacteria concentration for dry land, permanently messing your dataset by mixing those fake numbers in with real observations.
-```
+Answer 1.2 I assume it all comes down to the math. Sentinel values (here like 252 for land) are just arbitrary numeric codes used to label non-data pixels; they aren't real physical measurements. If you apply the mathematical transformation formula before removing them, R will blindly plug the number "252" into the equation. You would accidentally calculate a fake, valid-looking cyanobacteria concentration for dry land, permanently messing your dataset by mixing those fake numbers in with real observations.
 
 **Q1.3** The `others = NA` argument in `terra::classify()` is useful here. In your own words, what does it do?
 
-```{r}
-#1.3 When you give terra::classify() your reclassification matrix, R checks every single pixel against the specific rules you set up. If a pixel has a value that falls outside of the intervals you explicitly defined, the others = NA argument tells R to sweep it up and automatically convert it to an NA.
-```
+Answer 1.3 When you give terra::classify() your reclassification matrix, R checks every single pixel against the specific rules you set up. If a pixel has a value that falls outside of the intervals you explicitly defined, the others = NA argument tells R to sweep it up and automatically convert it to an NA.
 
 
 ---
@@ -315,16 +309,13 @@ tm_shape(sandusky_0816) +
 ### Questions for Task 2:
 
 **Q2.1** In your own words, what is the difference between `terra::crop()` and `terra::mask()`? Why did we use both here instead of just one?
-```{r}
-#2.1 terra::crop() shrinks the rectangular bounding box of your raster down to the general area of your shapefile, discarding the rest of the map. However, because rasters must remain rectangular, it still leaves in unwanted pixels outside your specific boundary. terra::mask() acts like a cookie-cutter, keeping the rectangle the same size but turning any pixels that fall outside your exact, irregular polygon shape into NA. We use both for efficiency: cropping first drastically reduces the file size so your computer doesn't have to work as hard during the computationally heavy masking step.
-```
+
+Answer 2.1 terra::crop() shrinks the rectangular bounding box of your raster down to the general area of your shapefile, discarding the rest of the map. However, because rasters must remain rectangular, it still leaves in unwanted pixels outside your specific boundary. terra::mask() acts like a cookie-cutter, keeping the rectangle the same size but turning any pixels that fall outside your exact, irregular polygon shape into NA. We use both for efficiency: cropping first drastically reduces the file size so your computer doesn't have to work as hard during the computationally heavy masking step.
 
 **Q2.2** The mean CI value for Sandusky Bay is likely different from the full lake mean. What could explain this? Does this necessarily mean Sandusky Bay has more or less cyanobacteria than average?
 
-```{r}
-#2.2 Sandusky Bay's mean CI is typically much higher than the full lake. Ecologically, this is because the bay is shallow, sheltered, warm, and fed directly by river runoff carrying agricultural nutrients the perfect environment for algae to thrive. So yes, a higher mean indicates that Sandusky Bay inherently experiences significantly more concentrated and severe cyanobacteria blooms than the vast, deeper open waters of Lake Erie.
+Answer 2.2 Sandusky Bay's mean CI is typically much higher than the full lake. Ecologically, this is because the bay is shallow, sheltered, warm, and fed directly by river runoff carrying agricultural nutrients the perfect environment for algae to thrive. So yes, a higher mean indicates that Sandusky Bay inherently experiences significantly more concentrated and severe cyanobacteria blooms than the vast, deeper open waters of Lake Erie.
 
-```
 
 ---
 
@@ -455,15 +446,12 @@ par(mfrow = c(1, 1))
 
 **Q3.1** What are the limitations of using **mean CI value** as a measure of bloom severity across the whole lake? What would be a more robust alternative metric?
 
-```{r}
-#3.1 Using a whole lake mean can be misleading because it dilutes severe, localized blooms by averaging them with vast areas of clean water.A better approach would be to calculate the Total Bloom Area, the Maximum CI, or the 95th percentile CI, which i believe captures the true intensity without distortion.
-```
+Answer 3.1 Using a whole lake mean can be misleading because it dilutes severe, localized blooms by averaging them with vast areas of clean water.A better approach would be to calculate the Total Bloom Area, the Maximum CI, or the 95th percentile CI, which i believe captures the true intensity without distortion.
 
 
 **Q3.2** Stacking rasters with `c()` in terra creates a multi-layer SpatRaster. What requirement must all rasters meet in order to be stacked this way? (Think: extent, resolution, CRS.)
-```{r}
-#3.2 To be stacked using terra::c(), rasters must align perfectly in space. Specifically, every raster in the stack must share the exact same CRS (projection), spatial extent (bounding box), and resolution (grid and pixel size).
-```
+
+Answer 3.2 To be stacked using terra::c(), rasters must align perfectly in space. Specifically, every raster in the stack must share the exact same CRS (projection), spatial extent (bounding box), and resolution (grid and pixel size).
 
 ---
 
@@ -584,14 +572,13 @@ tm_layout(main.title = "Peak Bloom & AOIs",
 ### Questions for Task 4:
 
 **Q4.1** You may have gotten `NA` values in your `terra::extract()` results for some AOIs. What could cause this? Name at least two reasons.
-```{r}
-#4.1. NA values during spatial extraction usually happen for two main reasons. First, the raster may already be masked during preprocessing pixels affected by clouds, land, or sensor errors are set to NA so they don’t bias the results. Second, there can be a spatial mismatch, where parts of an AOI extend beyond the area covered by the satellite image, meaning there are simply no raster values available in those regions.
-```
+
+Answer 4.1. NA values during spatial extraction usually happen for two main reasons. First, the raster may already be masked during preprocessing pixels affected by clouds, land, or sensor errors are set to NA so they don’t bias the results. Second, there can be a spatial mismatch, where parts of an AOI extend beyond the area covered by the satellite image, meaning there are simply no raster values available in those regions.
+
 
 **Q4.2** Looking at the spatial distribution of your AOIs on the map, which areas do you expect to be most prone to severe blooms, and why? (Consider geography, hydrology, land use in the Lake Erie watershed.)
-```{r}
-#4.2. The areas most likely to experience severe blooms are the western basin of Lake Erie, especially around Maumee Bay, and also Sandusky Bay. These areas are shallow and more enclosed, so the water warms up quickly and tends to stagnate in summer, which favors algal growth. In addition, they receive large amounts of nutrient runoff from surrounding agricultural land, particularly phosphorus and nitrogen. This combination of warm, slow moving, nutrient rich water makes them especially prone to intense cyanobacteria blooms.
-```
+
+Answer 4.2. The areas most likely to experience severe blooms are the western basin of Lake Erie, especially around Maumee Bay, and also Sandusky Bay. These areas are shallow and more enclosed, so the water warms up quickly and tends to stagnate in summer, which favors algal growth. In addition, they receive large amounts of nutrient runoff from surrounding agricultural land, particularly phosphorus and nitrogen. This combination of warm, slow moving, nutrient rich water makes them especially prone to intense cyanobacteria blooms.
 
 ---
 
@@ -599,27 +586,19 @@ tm_layout(main.title = "Peak Bloom & AOIs",
 ## Questions
 
 1. Throughout this lab you have been working with **raster** data. In what ways was the analysis workflow different from working with vector data (like you did in Labs 1–3)? What concepts translated directly, and what was fundamentally different?
-```{r}
-#1.Both raster and vector analyses require matching coordinate reference systems and making sure spatial layers line up correctly, so that part translates directly. The main difference comes from how the data are structured and analyzed. Vector data deals with discrete features (points, lines, polygons) and is typically handled through attribute tables and operations like joins or intersections. Raster data, on the other hand, represents continuous surfaces as grids of pixels. Because of that, raster analysis relies more on cell-based calculations, such as map algebra, reclassification, and working with pixel values directly, rather than table-based queries.
-```
+
+Answer 1: Both raster and vector analyses require matching coordinate reference systems and making sure spatial layers line up correctly, so that part translates directly. The main difference comes from how the data are structured and analyzed. Vector data deals with discrete features (points, lines, polygons) and is typically handled through attribute tables and operations like joins or intersections. Raster data, on the other hand, represents continuous surfaces as grids of pixels. Because of that, raster analysis relies more on cell-based calculations, such as map algebra, reclassification, and working with pixel values directly, rather than table-based queries.
 
 
 2. Cyanobacteria blooms are affected by temperature, nutrient runoff, and lake circulation. Based on the temporal patterns you observed in Task 3, does the timing of peak bloom match what you would expect ecologically? Explain your reasoning (I know you're not an expert on blooms - just demonstrate thinking).
-```{r}
-#2. The late August peak is consistent with what you would expect ecologically. By that time of year, water temperatures are at their highest, which promotes cyanobacteria growth. At the same time, nutrients from spring and early summer runoff, especially nitrogen and phosphorus from agriculture have had time to accumulate in the system. Combined with slower water movement in late summer, particularly in the western basin, these conditions would create an environment that strongly favors large blooms.
-```
+
+Answer 2: The late August peak is consistent with what you would expect ecologically. By that time of year, water temperatures are at their highest, which promotes cyanobacteria growth. At the same time, nutrients from spring and early summer runoff, especially nitrogen and phosphorus from agriculture have had time to accumulate in the system. Combined with slower water movement in late summer, particularly in the western basin, these conditions would create an environment that strongly favors large blooms.
+
 
 3. We used `terra::extract()` in Task 4 to perform a zonal summary. How does this relate conceptually to the **zonal operations** category of map algebra discussed in class?
 
-Using terra::extract() is an example of a zonal operation from map algebra. In this case, the AOI polygons define the zones, and the function summarizes the raster values (like calculating a mean) within each zone. So instead of looking at individual pixels, we are grouping them by area and then calculating statistics for each group, which is exactly what zonal operations are designed to do
+Answwer 3: Using terra::extract() is an example of a zonal operation from map algebra. In this case, the AOI polygons define the zones, and the function summarizes the raster values (like calculating a mean) within each zone. So instead of looking at individual pixels, we are grouping them by area and then calculating statistics for each group, which is exactly what zonal operations are designed to do
 
 
-
-
-
-
-```{r}
-#3. Using terra::extract() is an example of a zonal operation from map algebra. In this case, the AOI polygons define the zones, and the function summarizes the raster values (like calculating a mean) within each zone. So instead of looking at individual pixels, we are grouping them by area and then calculating statistics for each group, which is exactly what zonal operations are designed to do.
-```
 
 
