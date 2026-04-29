@@ -1,0 +1,511 @@
+---
+title: "Lab 06"
+subtitle: "Dynamic mapping with Leaflet"
+author: "Lakhvinder Singh"
+date: "29th April 2026"
+output:
+  html_document: default
+  pdf_document: default
+geometry: margin=1in
+---
+
+# Lab 06: Dynamic mapping with Leaflet
+
+### Read the instructions COMPLETELY before starting the lab
+
+This lab builds directly on labs 2–4 and the in-class Leaflet exercises. You will need those lab files available for reference.
+
+### Formatting your submission
+
+This lab must be placed into a public repository on GitHub (www.github.com). Before the due date, submit **on Canvas** a link to the repository. I will then download your repositories and run your code. The code must be contained in either a .R script or a .Rmd markdown document. As I need to run your code, any data you use in the lab must be referenced using **relative path names**. Finally, answers to questions I pose in this document must also be in the repository at the time you submit your link to Canvas. They can be in a separate text file, or if you decide to use an RMarkdown document, you can answer them directly in the doc.
+
+*Note: This lab is output as an HTML document — not a PDF. Leaflet maps are **interactive** and cannot be embedded in a static PDF. Your knitted output will be an `.html` file. Keep this in mind when organizing your submission.*
+
+## Introduction
+
+In the previous lab you built static maps using `tmap`. Static maps are excellent for print, publication, and controlled presentation. But many modern mapping applications demand **interactivity**: users want to pan, zoom, click, and toggle layers. Leaflet is the dominant open-source library for interactive web maps, and `leaflet` (the R package) wraps it for use in R.
+
+Leaflet's design philosophy is similar to `tmap` in that maps are built by **layering components**:
+
+```
+leaflet() %>%
+  addTiles() %>%                  # base map (tiles)
+  addPolygons(...) %>%            # vector layer
+  addLegend(...) %>%              # legend
+  addLayersControl(...)           # layer toggle
+```
+
+Each `add*()` call adds a new layer or control to the map object. The `%>%` pipe passes the map forward. This means you can build up a map incrementally, verify each piece, and compose them together — exactly as you did in `tmap`.
+
+Key resources:
+- Official leaflet for R docs: https://rstudio.github.io/leaflet/
+- Making maps with R (Hahn, Ch. 5): https://bookdown.org/nicohahn/making_maps_with_r5/docs/leaflet.html
+- `leaflet.providers` for basemap tile options
+
+```{r packages, echo=TRUE, message=TRUE}
+library(sf)
+library(leaflet)
+library(tidyverse)
+library(spdep)   # needed for Task 2 (Moran/LISA)
+library(tmap)
+library(tidycensus)     # for Task 2 
+library(terra)          # for Task 3 raster handling
+library(raster)         
+library(leaflet.extras) # for addMiniMap in Task 3
+library(leafsync)       # for the bonus side-by-side map
+library(htmltools)
+```
+
+*Note: You may need additional packages depending on your Task 3 choices. Load them here.*
+
+---
+
+## Task 1: Choropleth from Lab 2
+
+*Reference: leaflet docs — `addPolygons()`, `colorBin()`, `addLegend()`*
+
+In Lab 2, Task 2.3, you created a choropleth of Chesapeake Bay Watershed counties shaded by the total cost of BMPs funded/implemented in each county. Here you will recreate that map in Leaflet.
+
+### 1.1 — Reload and prepare the data
+
+Go back to your Lab 2 code and reload the county geometry and BMP cost data. Perform whatever join and preprocessing was necessary to produce your choropleth variable. Store the result as an `sf` object called `counties_bmp`.
+
+Before mapping, **check and set the CRS**. Leaflet requires geographic coordinates (WGS 84, EPSG 4326). If your data are in a projected CRS, reproject now using `sf::st_transform(counties_bmp, 4326)`.
+
+```{r task1_data, echo=TRUE, message=TRUE}
+
+# Load counties and BMP data
+counties <- read_sf("./data/CBW/County_Boundaries.shp") %>%
+  st_make_valid()
+
+bmps <- read_csv("./data/CBW/BMPreport2016_landbmps.csv") %>%
+  mutate(FIPS = str_sub(GeographyName, 1, 5))
+
+# Sum BMP cost per county
+bmp_cty <- bmps %>%
+  group_by(FIPS) %>%
+  summarise(total_cost = sum(Cost, na.rm = TRUE))
+
+# Join BMP costs to county geometry
+counties_bmp <- counties %>%
+  left_join(bmp_cty, by = c("GEOID10" = "FIPS")) %>%
+  mutate(total_cost_m = total_cost / 1e6)  # scale to $ millions for readability
+
+# Check CRS, reproject to WGS84 for Leaflet
+st_crs(counties_bmp)
+counties_bmp <- st_transform(counties_bmp, 4326)
+
+# Drop any rows with NA cost so the legend/palette don't complain
+counties_bmp$total_cost_m[is.na(counties_bmp$total_cost_m)] <- 0
+
+head(counties_bmp)
+```
+
+### 1.2 — Define a color palette
+
+Leaflet's `colorBin()` function creates a color palette from a set of breaks. You must determine the **equal-interval breaks programmatically** — do not hard-code them.
+
+*Hint: The range of the variable divided by the number of classes gives you the interval width. `seq()` can generate your break points.*
+
+```{r task1_palette, echo=TRUE, message=TRUE}
+
+# Build equal-interval breaks programmatically (5 classes = 6 break points)
+n_classes <- 5
+breaks <- seq(
+  from = min(counties_bmp$total_cost_m, na.rm = TRUE),
+  to   = max(counties_bmp$total_cost_m, na.rm = TRUE),
+  length.out = n_classes + 1
+)
+
+# Using YlOrRd (sequential ColorBrewer palette)
+pal <- colorBin(
+  palette = "YlOrRd",
+  domain  = counties_bmp$total_cost_m,
+  bins    = breaks,
+  na.color = "#cccccc"
+)
+```
+
+*Requirement: Do NOT use the default color scheme (Blues). Choose a palette appropriate for sequential data from a source like ColorBrewer.*
+
+### 1.3 — Build the choropleth map
+
+Build the Leaflet map with the following requirements:
+
+- The county polygons colored by total BMP cost using your `colorBin()` palette
+- A **mouse-over label** that displays the county name and total cost when the cursor hovers over a county. Use the `label` argument in `addPolygons()`.
+- A **legend** using `addLegend()`
+- A basemap tile layer using `addProviderTiles()` — choose something other than the default OpenStreetMap. Browse options at https://leaflet-extras.github.io/leaflet-providers/preview/
+
+```{r task1_map, echo=TRUE, message=TRUE}
+# Building hover labels: county name + total cost formatted to 2 decimals
+hover_labels <- sprintf(
+  "<strong>%s County</strong><br/>Total BMP cost: $%.2fM",
+  counties_bmp$NAME10, counties_bmp$total_cost_m
+) %>% lapply(htmltools::HTML)
+
+leaflet(counties_bmp) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%   # non-default basemap
+  addPolygons(
+    fillColor   = ~pal(total_cost_m),
+    fillOpacity = 0.8,
+    color       = "white",
+    weight      = 0.5,
+    label       = hover_labels,
+    highlightOptions = highlightOptions(
+      weight = 2, color = "#333", fillOpacity = 0.9, bringToFront = TRUE
+    )
+  ) %>%
+  addLegend(
+    pal      = pal,
+    values   = ~total_cost_m,
+    title    = "Total BMP Cost<br/>($ millions)",
+    position = "bottomright",
+    opacity  = 0.9
+  )
+```
+
+**Reflection question 1 (answer in your repo):** In `tmap`, classification method choices (jenks, quantile, etc.) are made when you call `tm_polygons()`. In Leaflet, you define the palette and breaks separately using `colorBin()`, `colorQuantile()`, or `colorNumeric()`. What are the trade-offs of this approach? Does separating the palette from the geometry layer give you more or less flexibility? Give a specific example.
+
+Separating the palette from the geometry layer gives more flexibility but costs you convenience. In `tmap`, I just write `style = "quantile"` and it handles everything; in Leaflet I have to compute the breaks myself, pick the palette function that matches my data type, and then pass the same palette to both `addPolygons()` and `addLegend()`. The upside is reuse and transparency: I can define one palette and apply it across several layers or widgets, and I can see exactly what my breaks are instead of trusting a keyword. For example, in Task 1 I used `seq()` to build equal-interval breaks explicitly, which means if I later wanted to switch to quantile breaks I only change the `breaks` object, not the map code. In `tmap` I'd rewrite the polygon call.
+
+---
+
+## Task 2: LISA map from Lab 3
+
+*Reference: leaflet docs — `addPolygons()` popup, `addLayersControl()`, `addProviderTiles()`*
+
+In Lab 3, Bonus Task 2, you produced a choropleth map of LISA (local Moran's I) quadrants — a categorical four-class map showing spatial clustering patterns (HH, HL, LH, LL). Here you will recreate that map in Leaflet with interactive enhancements.
+
+### 2.1 — Reload and prepare the data
+
+Go back to your Lab 3 code. Reload the spatial data and rerun the Moran/LISA analysis to recover the quadrant assignments and p-values. Store the result as an `sf` object called `counties_lisa`, reprojected to WGS 84 (EPSG 4326).
+
+*Note: You need both the quadrant labels and the p-values — make sure both are columns in `counties_lisa` before proceeding.*
+
+```{r task2_data, echo=TRUE, message=TRUE}
+
+# Rerun Lab 3 Bonus Task 2 workflow: % Bachelor's degrees across 5 contiguous states
+edu_data <- get_acs(
+  geography = "county",
+  state     = c("OH", "PA", "WV", "IN", "MI"),
+  variables = c(total_pop = "B15003_001", bachelors = "B15003_022"),
+  output    = "wide",
+  geometry  = TRUE,
+  cb        = TRUE,
+  year      = 2020
+)
+
+my_subset <- edu_data %>%
+  mutate(pct_bachelors = (bachelorsE / total_popE) * 100) %>%
+  filter(!is.na(pct_bachelors)) %>%
+  st_transform("ESRI:102010")  # projected CRS for neighborhood calculations
+
+# neighbors
+nb_queen <- poly2nb(my_subset, queen = TRUE, snap = 1e-6)
+
+# weights
+lw_queen <- nb2listw(nb_queen, style = "W", zero.policy = TRUE)
+
+# local moran
+lisa <- localmoran(my_subset$pct_bachelors, lw_queen, zero.policy = TRUE)
+
+my_subset$Ii <- lisa[,1]
+my_subset$p_value <- lisa[,5]
+
+# center variable
+x_centered <- my_subset$pct_bachelors - 
+              mean(my_subset$pct_bachelors, na.rm = TRUE)
+
+# spatial lag (correct way)
+lag_centered <- lag.listw(lw_queen, x_centered, zero.policy = TRUE)
+
+# quadrants
+my_subset$quadrant <- ifelse(x_centered > 0 & lag_centered > 0, "HH",
+                       ifelse(x_centered > 0 & lag_centered < 0, "HL",
+                       ifelse(x_centered < 0 & lag_centered > 0, "LH", "LL")))
+
+# significance
+my_subset$quadrant[my_subset$p_value > 0.05] <- "Not significant"
+
+# leaflet-ready
+counties_lisa <- st_transform(my_subset, 4326)
+```
+
+### 2.2 — Define a categorical color palette
+
+LISA quadrants are a categorical variable (four classes). Use `colorFactor()` instead of `colorBin()`. Assign a distinct, meaningful color to each quadrant (HH, HL, LH, LL). A common convention is warm colors for High clusters and cool colors for Low clusters.
+
+```{r task2_palette, echo=TRUE, message=TRUE}
+# Warm reds for High clusters, cool blues for Low clusters, grey for non-significant
+
+lisa_levels <- c("HH", "HL", "LH", "LL", "Not significant")
+lisa_colors <- c(
+  "HH" = "#d7191c",       # dark red  — high surrounded by high
+  "HL" = "#fdae61",       # orange    — high outlier in low neighborhood
+  "LH" = "#abd9e9",       # light blue — low outlier in high neighborhood
+  "LL" = "#2c7bb6",       # dark blue  — low surrounded by low
+  "Not significant" = "#e0e0e0"
+)
+
+pal_lisa <- colorFactor(
+  palette = lisa_colors,
+  levels  = lisa_levels,
+  na.color = "#e0e0e0"
+)
+```
+
+### 2.3 — Build the LISA map
+
+Build the Leaflet map with the following requirements:
+
+- County polygons colored by LISA quadrant using your `colorFactor()` palette
+- A **pop-up window** (not a hover label) that displays the p-value for that county when clicked. Use the `popup` argument in `addPolygons()`. Format the p-value to a reasonable number of decimal places.
+- A **basemap switcher** that allows the user to toggle between **3 different basemaps**. Use `addProviderTiles()` with `group` arguments and `addLayersControl()` with `baseGroups`.
+- A legend
+
+```{r task2_map, echo=TRUE, message=TRUE}
+# Popup text: county name, quadrant, and p-value formatted to 4 decimals
+
+lisa_popups <- sprintf(
+  "<strong>%s</strong><br/>Quadrant: %s<br/>p-value: %.4f",
+  counties_lisa$NAME, counties_lisa$quadrant, counties_lisa$p_value
+) %>% lapply(htmltools::HTML)
+
+leaflet(counties_lisa) %>%
+  # Three basemaps with distinct `group` labels for the layers control
+  addProviderTiles(providers$CartoDB.Positron,  group = "Positron (light)") %>%
+  addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") %>%
+  addProviderTiles(providers$OpenTopoMap,       group = "Topographic") %>%
+  addPolygons(
+    fillColor   = ~pal_lisa(quadrant),
+    fillOpacity = 0.8,
+    color       = "white",
+    weight      = 0.5,
+    popup       = lisa_popups,
+    highlightOptions = highlightOptions(
+      weight = 2, color = "#333", fillOpacity = 0.9, bringToFront = TRUE
+    )
+  ) %>%
+  addLegend(
+    pal    = pal_lisa,
+    values = ~quadrant,
+    title  = "LISA quadrant<br/>(% Bachelor's)",
+    position = "bottomright",
+    opacity  = 0.9
+  ) %>%
+  addLayersControl(
+    baseGroups = c("Positron (light)", "Satellite", "Topographic"),
+    options    = layersControlOptions(collapsed = FALSE)
+  )
+```
+
+*Tip: The `addLayersControl()` function accepts `baseGroups` (radio buttons, one active at a time) and `overlayGroups` (checkboxes, multiple can be active). Basemaps should be `baseGroups`.*
+
+**Reflection question 2 (answer in your repo):** Compare the static LISA map you made in Lab 3 to this interactive version. What does interactivity add? Are there things the static map communicates more clearly? Consider map reading purpose (exploration vs. communication) in your answer.
+
+The interactive Leaflet version is better for exploration. I can click any county to see its exact p-value, switch basemaps to check whether a High-High cluster sits over a major metro or rural area, and zoom in to examine individual county boundaries. That detail is effectively invisible on the static Lab 3 map. The static version, though, is better for communication: a reader sees the entire spatial pattern at once and can't miss the overall story (e.g., the HH cluster around the Pittsburgh/Cleveland metro corridor). Interactivity trades a clear immediate message for the ability to drill in — great for an analyst, but a print figure still wins when I just need one takeaway delivered.
+---
+
+## Task 3: Free-form map from Lab 4
+
+*Reference: leaflet docs — `addLayersControl()` with overlayGroups, your choice of other features*
+
+In Lab 5, Task 5, you created an original map combining vector and raster data, representing both a social and an environmental process. Here you will recreate that concept in Leaflet.
+
+*Note: Leaflet handles raster data differently than `tmap`. The `addRasterImage()` function in the `leaflet` package can display projected rasters, but requires the `raster` package (not `terra`) or conversion. An alternative is to represent the "environmental process" through a different vector layer (e.g., watersheds, land cover categories as polygons) if raster integration proves difficult. Document your approach in a comment.*
+
+### 3.1 — Reload and prepare your data
+
+Reload the data you used in your original free-form map. Reproject all layers to WGS 84 (EPSG 4326). List the layers you are using in a comment.
+
+```{r task3_data, echo=TRUE, message=TRUE}
+# Layers I'm using
+#  - social layer:        Portage + Summit county boundaries (administrative)
+#  - environmental layer: NLCD land cover raster reclassified into Urban / Natural / Agricultural
+#  - environmental layer: linear water features (streams/rivers) from TIGER for both counties
+
+# Approach: NLCD raster is processed using terra (crop, mask, reclassify, project), then converted to a raster::RasterLayer because leaflet::addRasterImage() is more stable with raster objects than terra SpatRaster.
+
+nlcd          <- rast("./data/ohio/neoh_nlcd.tif")
+oh_counties   <- read_sf("./data/static_mapping/oh_counties.gpkg")
+water_portage <- read_sf("./data/static_mapping/tl_2022_39133_linearwater/tl_2022_39133_linearwater.shp")
+water_summit  <- read_sf("./data/static_mapping/tl_2023_39153_linearwater/tl_2023_39153_linearwater.shp")
+
+# Study area: Portage + Summit counties
+sa        <- oh_counties |> filter(NAME %in% c("Portage", "Summit"))
+sa_albers <- st_transform(sa, crs(nlcd))
+nlcd_sa   <- crop(nlcd, vect(sa_albers)) |> mask(vect(sa_albers))
+
+# Reclassify NLCD: 1=Urban, 2=Natural, 3 = Agricultural
+rcl <- matrix(c(21,24,1, 41,43,2, 90,95,2, 81,82,3), ncol = 3, byrow = TRUE)
+nlcd_rc <- classify(nlcd_sa, rcl, others = NA)
+
+# Reproject everything to WGS84 for Leaflet
+nlcd_wgs  <- project(nlcd_rc, "EPSG:4326", method = "near")
+sa_wgs    <- st_transform(sa, 4326)
+water_wgs <- bind_rows(st_transform(water_portage, 4326),
+                       st_transform(water_summit,  4326))
+
+# Convert terra SpatRaster -> raster::RasterLayer for leaflet::addRasterImage()
+nlcd_raster <- raster::raster(nlcd_wgs)
+```
+
+### 3.2 — Build the interactive map
+
+Build the Leaflet map with the following requirements:
+
+- At least **two distinct data layers** (one social, one environmental)
+- A **layer toggle control** (`addLayersControl()` with `overlayGroups`) that lets the user turn each layer on or off independently
+- At least **one additional interactive feature** of your choosing that is meaningful for YOUR specific map. Options include (but are not limited to):
+  - Popups with attribute data
+  - Hover labels
+  - A minimap (`addMiniMap()` from `leaflet.extras`)
+  - Marker clustering
+  - A scale bar (`addScaleBar()`)
+  - Highlighting on hover (`highlight` argument in `addPolygons()`)
+- A legend for at least one layer
+
+Document your "one thing" choice in a comment explaining what it is and why it fits your map.
+
+```{r task3_map, echo=TRUE, message=TRUE}
+# Categorical color palette for the reclassified land cover raster
+lc_values <- c(1, 2, 3)
+lc_labels <- c("Urban / Developed", "Natural (Forest & Wetland)", "Agricultural")
+lc_cols   <- c("#cc0000", "#2ca25f", "#dcd939")
+
+pal_lc <- colorFactor(
+  palette  = lc_cols,
+  domain   = lc_values,
+  na.color = "transparent"
+)
+
+# Hover labels on the county polygons
+county_labels <- sprintf("<strong>%s County</strong>", sa_wgs$NAME) %>%
+  lapply(htmltools::HTML)
+
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron, group = "Basemap") %>%
+  # Environmental layer 1: land cover raster
+  addRasterImage(
+    nlcd_raster,
+    colors  = pal_lc,
+    opacity = 0.75,
+    group   = "Land cover"
+  ) %>%
+  # Environmental layer 2: streams/rivers
+  addPolylines(
+    data = water_wgs,
+    color = "#2166ac", weight = 1, opacity = 0.85,
+    group = "Water features"
+  ) %>%
+  # Social layer: county boundaries with hover labels and click popups
+  addPolygons(
+    data = sa_wgs,
+    fill = FALSE,
+    color = "black", weight = 2,
+    label = county_labels,
+    popup = ~paste0("<strong>", NAME, " County</strong><br/>FIPS: ", GEOID),
+    highlightOptions = highlightOptions(
+      weight = 4, color = "#333", bringToFront = TRUE
+    ),
+    group = "County boundaries"
+  ) %>%
+  addLegend(
+    colors   = lc_cols,
+    labels   = lc_labels,
+    title    = "Land cover",
+    position = "bottomright",
+    opacity  = 0.9
+  ) %>%
+  addScaleBar(position = "bottomleft") %>%
+  addMiniMap(
+    tiles = providers$CartoDB.Positron,
+    position = "topright",
+    width = 150, height = 150,
+    toggleDisplay = TRUE
+  ) %>%
+  addLayersControl(
+    overlayGroups = c("Land cover", "Water features", "County boundaries"),
+    options = layersControlOptions(collapsed = FALSE)
+  )
+
+# I added a minimap in the corner (addMiniMap from leaflet.extras). This is applicable because my study area is only two counties. readers zoomed in to look at Akron or a specific park need a constant spatial anchor showing where NE Ohio sits. A scale bar tells you distance; a minimap tells you where you are, which matters more here.
+
+```
+
+**Reflection question 3 (answer in your repo):** Describe the one extra feature you added and justify why it is meaningful for your specific map — not just technically interesting, but cartographically or analytically useful for the story you are trying to tell.
+
+I added a minimap in the top-right corner. The main map is tightly focused on just Portage and Summit counties — once a user zooms in to, say, downtown Akron or a rural stretch of eastern Portage, they lose all sense of where they are in Ohio or the broader region. A scale bar answers "how far?" but not "where am I?" The minimap keeps the two-county study area visible at a constant wider extent while the user explores, which directly supports the story of this map: the urban–rural gradient across NE Ohio. Without that anchor, the land-cover story floats in space; with it, the reader can always tell they're looking at the eastern edge of the Cleveland-Akron metro region rather than somewhere generic.
+
+---
+
+## Questions
+
+1. Reflect on the labs from this semester. What did you learn? What did you like? What did you not like? (Be specific — vague answers will receive partial credit.)
+
+Over the semester, I progressed from basic sf and tidyverse workflows in Lab 2 to spatial autocorrelation in Lab 3, static cartography with tmap in Lab 5, and interactive mapping with Leaflet in Lab 6. The most valuable concept I learned was the composable-layer approach to mapping—using structures like tm_shape() + tm_polygons() in tmap and leaflet() %>% addPolygons() in Leaflet. Once this clicked, map construction became more systematic and intuitive rather than trial-and-error.
+
+Lab 3 was the most meaningful because Moran’s I provided a formal way to test spatial patterns instead of relying on visual interpretation alone. This shifted my thinking from descriptive to analytical spatial reasoning. Lab 5 was initially the most challenging, particularly the inset map and viewport calculations, which required careful handling of coordinate systems and layout logic. However, it ultimately helped me understand how underlying graphics systems (e.g., grid) structure map composition. The most consistent difficulty across labs was CRS management. Forgetting to reproject, or doing so at the wrong step, caused repeated issues in spatial joins, distance calculations, and mapping. This was the most time-consuming source of errors but also reinforced the importance of projection awareness in spatial analysis.
+
+2. In this lab, all three tasks involved taking existing analysis and presenting it interactively. What does Leaflet add beyond what `tmap` could do? And conversely, what did you give up by switching to Leaflet? Consider both technical and cartographic dimensions.
+
+Leaflet introduces interactivity that fundamentally changes how spatial data can be explored. Users can pan, zoom, toggle layers, and retrieve attribute information through clicks and hover interactions. For example, in Task 2, clicking a county reveals its exact LISA p-value, which would otherwise require a separate table or annotation in a static map. Basemap flexibility (e.g., satellite or topographic layers) also improves contextual interpretation by linking abstract data to real-world geography.However, this interactivity comes at the cost of cartographic control. tmap is better suited for producing polished, publication-quality maps with precise control over layout elements such as legends, titles, and scale bars. Leaflet maps are less suitable for static outputs—they do not translate well to PDF and offer limited control over layout aesthetics. In short, Leaflet prioritizes exploratory analysis, while tmap is stronger for communicating a fixed, well-designed message.
+
+3. Describe the "one thing" you chose to add to your map in Task 3. What did you implement, why is it applicable to your specific map, and how does it change the user's experience compared to a static version?
+
+I added a minimap (via `addMiniMap()` from `leaflet.extras`) in the top-right corner. My Task 3 map covers only Portage and Summit counties, so when a user zooms in on, say, the Akron urban core to see how streams thread through developed land, they lose all context about where in Ohio they are. The minimap keeps a wider reference view locked in the corner and highlights the current viewport, so the user always has a spatial anchor. Compared to the Lab 5 static version — which solved this problem with an inset map drawn once — the Leaflet minimap updates dynamically as the user pans and zooms, which means the context stays accurate at every zoom level rather than only at the one the designer picked.
+---
+
+## Bonus (+20 points)
+
+Extend your Task 2 LISA map to include a **synchronized side-by-side view**: the LISA quadrant map on one side and the underlying variable choropleth (from Task 1 or your Lab 3 variable) on the other. The `leafsync` package provides `sync()` for this purpose.
+
+The two maps should share the same extent and zoom level. When you pan or zoom one, the other follows. Add a brief comment explaining what analytical value this comparison provides.
+
+```{r bonus, echo=TRUE, message=TRUE}
+
+#Left map: underlying variable (% Bachelor's) as a choropleth
+pct_breaks <- seq(
+  min(counties_lisa$pct_bachelors, na.rm = TRUE),
+  max(counties_lisa$pct_bachelors, na.rm = TRUE),
+  length.out = 6
+)
+pal_pct <- colorBin("YlGnBu", counties_lisa$pct_bachelors, bins = pct_breaks)
+
+pct_labels <- sprintf(
+  "<strong>%s</strong><br/>%% Bachelor's: %.1f%%",
+  counties_lisa$NAME, counties_lisa$pct_bachelors
+) %>% lapply(htmltools::HTML)
+
+map_pct <- leaflet(counties_lisa) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(
+    fillColor = ~pal_pct(pct_bachelors),
+    fillOpacity = 0.8, color = "white", weight = 0.5,
+    label = pct_labels
+  ) %>%
+  addLegend(pal = pal_pct, values = ~pct_bachelors,
+            title = "% Bachelor's", position = "bottomright")
+
+#Right map: LISA quadrants (same one from Task 2)
+map_lisa <- leaflet(counties_lisa) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(
+    fillColor = ~pal_lisa(quadrant),
+    fillOpacity = 0.8, color = "white", weight = 0.5,
+    popup = lisa_popups
+  ) %>%
+  addLegend(pal = pal_lisa, values = ~quadrant,
+            title = "LISA quadrant", position = "bottomright")
+
+map_pct <- map_pct %>% addControl("Bachelor’s Degree by County", position = "topleft")
+
+map_lisa <- map_lisa %>% addControl("Local Moran’s I Clusters", position = "topleft")
+
+# Syncing the two so zooming one moves the other
+leafsync::sync(map_pct, map_lisa)
+
+# LISA quadrants identify where spatial clustering is statistically significant, but they do not convey the magnitude of the underlying variable. For example, a county classified as “High–High” could have 35% or 55% bachelor’s attainment, yet both appear identical in the LISA map. Pairing the LISA map with the underlying choropleth preserves this quantitative context, allowing the reader to interpret both the statistical pattern and the actual values simultaneously. Synchronized panning and zooming ensure that both views remain aligned, enabling direct, one-to-one comparison of any location without losing spatial context.
+
+```
