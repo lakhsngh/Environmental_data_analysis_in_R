@@ -46,10 +46,10 @@ Key resources:
 library(sf)
 library(leaflet)
 library(tidyverse)
-library(spdep)   # needed for Task 2 (Moran/LISA)
+library(spdep)   
 library(tmap)
-library(tidycensus)     # for Task 2 
-library(terra)          # for Task 3 raster handling
+library(tidycensus)   
+library(terra)        
 library(raster)         
 library(leaflet.extras) # for addMiniMap in Task 3
 library(leafsync)       # for the bonus side-by-side map
@@ -74,7 +74,7 @@ Before mapping, **check and set the CRS**. Leaflet requires geographic coordinat
 
 ```{r task1_data, echo=TRUE, message=TRUE}
 
-# Load counties and BMP data
+# Loading counties and BMP data
 counties <- read_sf("./data/CBW/County_Boundaries.shp") %>%
   st_make_valid()
 
@@ -86,12 +86,12 @@ bmp_cty <- bmps %>%
   group_by(FIPS) %>%
   summarise(total_cost = sum(Cost, na.rm = TRUE))
 
-# Join BMP costs to county geometry
+# Joining BMP costs to county geometry
 counties_bmp <- counties %>%
   left_join(bmp_cty, by = c("GEOID10" = "FIPS")) %>%
   mutate(total_cost_m = total_cost / 1e6)  # scale to $ millions for readability
 
-# Check CRS, reproject to WGS84 for Leaflet
+# Checking CRS, reprojecting to WGS84 for Leaflet
 st_crs(counties_bmp)
 counties_bmp <- st_transform(counties_bmp, 4326)
 
@@ -109,7 +109,7 @@ Leaflet's `colorBin()` function creates a color palette from a set of breaks. Yo
 
 ```{r task1_palette, echo=TRUE, message=TRUE}
 
-# Build equal-interval breaks programmatically (5 classes = 6 break points)
+# Building equal-interval breaks (5 classes = 6 break points)
 n_classes <- 5
 breaks <- seq(
   from = min(counties_bmp$total_cost_m, na.rm = TRUE),
@@ -138,6 +138,7 @@ Build the Leaflet map with the following requirements:
 - A basemap tile layer using `addProviderTiles()` — choose something other than the default OpenStreetMap. Browse options at https://leaflet-extras.github.io/leaflet-providers/preview/
 
 ```{r task1_map, echo=TRUE, message=TRUE}
+
 # Building hover labels: county name + total cost formatted to 2 decimals
 hover_labels <- sprintf(
   "<strong>%s County</strong><br/>Total BMP cost: $%.2fM",
@@ -145,7 +146,7 @@ hover_labels <- sprintf(
 ) %>% lapply(htmltools::HTML)
 
 leaflet(counties_bmp) %>%
-  addProviderTiles(providers$CartoDB.Positron) %>%   # non-default basemap
+  addProviderTiles(providers$CartoDB.Positron) %>%  
   addPolygons(
     fillColor   = ~pal(total_cost_m),
     fillOpacity = 0.8,
@@ -237,7 +238,6 @@ counties_lisa <- st_transform(my_subset, 4326)
 LISA quadrants are a categorical variable (four classes). Use `colorFactor()` instead of `colorBin()`. Assign a distinct, meaningful color to each quadrant (HH, HL, LH, LL). A common convention is warm colors for High clusters and cool colors for Low clusters.
 
 ```{r task2_palette, echo=TRUE, message=TRUE}
-# Warm reds for High clusters, cool blues for Low clusters, grey for non-significant
 
 lisa_levels <- c("HH", "HL", "LH", "LL", "Not significant")
 lisa_colors <- c(
@@ -304,7 +304,7 @@ leaflet(counties_lisa) %>%
 
 **Reflection question 2 (answer in your repo):** Compare the static LISA map you made in Lab 3 to this interactive version. What does interactivity add? Are there things the static map communicates more clearly? Consider map reading purpose (exploration vs. communication) in your answer.
 
-The interactive Leaflet version is better for exploration. I can click any county to see its exact p-value, switch basemaps to check whether a High-High cluster sits over a major metro or rural area, and zoom in to examine individual county boundaries. That detail is effectively invisible on the static Lab 3 map. The static version, though, is better for communication: a reader sees the entire spatial pattern at once and can't miss the overall story (e.g., the HH cluster around the Pittsburgh/Cleveland metro corridor). Interactivity trades a clear immediate message for the ability to drill in — great for an analyst, but a print figure still wins when I just need one takeaway delivered.
+The interactive Leaflet version is better for exploration. I can click any county to see its exact p-value, switch basemaps to check whether a High-High cluster sits over a major metro or rural area, and zoom in to examine individual county boundaries. That detail is effectively invisible on the static Lab 3 map. The static version, though, is better for communication: a reader sees the entire spatial pattern at once and can't miss the overall story. Interactivity trades a clear immediate message for the ability to drill in which is great for an analyst, but a print figure still wins when I just need one takeaway delivered.
 ---
 
 ## Task 3: Free-form map from Lab 4
@@ -326,6 +326,7 @@ Reload the data you used in your original free-form map. Reproject all layers to
 #  - environmental layer: linear water features (streams/rivers) from TIGER for both counties
 
 # Approach: NLCD raster is processed using terra (crop, mask, reclassify, project), then converted to a raster::RasterLayer because leaflet::addRasterImage() is more stable with raster objects than terra SpatRaster.
+
 
 nlcd          <- rast("./data/ohio/neoh_nlcd.tif")
 oh_counties   <- read_sf("./data/static_mapping/oh_counties.gpkg")
@@ -369,7 +370,7 @@ Build the Leaflet map with the following requirements:
 Document your "one thing" choice in a comment explaining what it is and why it fits your map.
 
 ```{r task3_map, echo=TRUE, message=TRUE}
-# Categorical color palette for the reclassified land cover raster
+
 lc_values <- c(1, 2, 3)
 lc_labels <- c("Urban / Developed", "Natural (Forest & Wetland)", "Agricultural")
 lc_cols   <- c("#cc0000", "#2ca25f", "#dcd939")
@@ -446,15 +447,15 @@ I added a minimap in the top-right corner. The main map is tightly focused on ju
 
 Over the semester, I progressed from basic sf and tidyverse workflows in Lab 2 to spatial autocorrelation in Lab 3, static cartography with tmap in Lab 5, and interactive mapping with Leaflet in Lab 6. The most valuable concept I learned was the composable-layer approach to mapping—using structures like tm_shape() + tm_polygons() in tmap and leaflet() %>% addPolygons() in Leaflet. Once this clicked, map construction became more systematic and intuitive rather than trial-and-error.
 
-Lab 3 was the most meaningful because Moran’s I provided a formal way to test spatial patterns instead of relying on visual interpretation alone. This shifted my thinking from descriptive to analytical spatial reasoning. Lab 5 was initially the most challenging, particularly the inset map and viewport calculations, which required careful handling of coordinate systems and layout logic. However, it ultimately helped me understand how underlying graphics systems (e.g., grid) structure map composition. The most consistent difficulty across labs was CRS management. Forgetting to reproject, or doing so at the wrong step, caused repeated issues in spatial joins, distance calculations, and mapping. This was the most time-consuming source of errors but also reinforced the importance of projection awareness in spatial analysis.
+Lab 3 was the most meaningful because Moran’s I provided a formal way to test spatial patterns instead of relying on visual interpretation alone.This shifted my thinking from descriptive to analytical spatial reasoning. Lab 5 was initially the most challenging, particularly the inset map and viewport calculations, which required careful handling of coordinate systems and layout logic. However, it ultimately helped me understand how underlying graphics systems (e.g., grid) structure map composition. The most consistent difficulty across labs was CRS management. Forgetting to reproject, or doing so at the wrong step, caused repeated issues in spatial joins, distance calculations, and mapping. This was the most time-consuming source of errors but also reinforced the importance of projection awareness in spatial analysis.
 
 2. In this lab, all three tasks involved taking existing analysis and presenting it interactively. What does Leaflet add beyond what `tmap` could do? And conversely, what did you give up by switching to Leaflet? Consider both technical and cartographic dimensions.
 
-Leaflet introduces interactivity that fundamentally changes how spatial data can be explored. Users can pan, zoom, toggle layers, and retrieve attribute information through clicks and hover interactions. For example, in Task 2, clicking a county reveals its exact LISA p-value, which would otherwise require a separate table or annotation in a static map. Basemap flexibility (e.g., satellite or topographic layers) also improves contextual interpretation by linking abstract data to real-world geography.However, this interactivity comes at the cost of cartographic control. tmap is better suited for producing polished, publication-quality maps with precise control over layout elements such as legends, titles, and scale bars. Leaflet maps are less suitable for static outputs—they do not translate well to PDF and offer limited control over layout aesthetics. In short, Leaflet prioritizes exploratory analysis, while tmap is stronger for communicating a fixed, well-designed message.
+Leaflet introduces interactivity that fundamentally changes how spatial data can be explored. Users can pan, zoom, toggle layers, and retrieve attribute information through clicks and hover interactions. For example, in Task 2, clicking a county reveals its exact LISA p-value, which would otherwise require a separate table or annotation in a static map. Basemap flexibility (e.g., satellite or topographic layers) also improves contextual interpretation by linking abstract data to real-world geography.However, this interactivity comes at the cost of cartographic control. tmap is better suited for producing polished, publication-quality maps with precise control over layout elements such as legends, titles, and scale bars. Leaflet maps are less suitable for static outputs they do not translate well to PDF and offer limited control over layout aesthetics. In short, Leaflet prioritizes exploratory analysis, while tmap is stronger for communicating a fixed, well-designed message.
 
 3. Describe the "one thing" you chose to add to your map in Task 3. What did you implement, why is it applicable to your specific map, and how does it change the user's experience compared to a static version?
 
-I added a minimap (via `addMiniMap()` from `leaflet.extras`) in the top-right corner. My Task 3 map covers only Portage and Summit counties, so when a user zooms in on, say, the Akron urban core to see how streams thread through developed land, they lose all context about where in Ohio they are. The minimap keeps a wider reference view locked in the corner and highlights the current viewport, so the user always has a spatial anchor. Compared to the Lab 5 static version — which solved this problem with an inset map drawn once — the Leaflet minimap updates dynamically as the user pans and zooms, which means the context stays accurate at every zoom level rather than only at the one the designer picked.
+I added a minimap (via `addMiniMap()` from `leaflet.extras`) in the top-right corner. My Task 3 map covers only Portage and Summit counties, so when a user zooms in on, say, the Akron urban core to see how streams thread through developed land, they lose all context about where in Ohio they are. The minimap keeps a wider reference view locked in the corner and highlights the current viewport, so the user always has a spatial anchor. Compared to the Lab 5 static version which solved this problem with an inset map drawn once, the Leaflet minimap updates dynamically as the user pans and zooms, which means the context stays accurate at every zoom level rather than only at the one the designer picked.
 ---
 
 ## Bonus (+20 points)
