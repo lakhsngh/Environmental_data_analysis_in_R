@@ -1,0 +1,160 @@
+---
+title: "eBird Data Filtering and Preparation"
+author: "Lakhvinder Singh"
+date: "2026-03-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Load Libraries and Define File Paths
+library(auk)
+library(dplyr)
+library(lubridate)
+library(sf)
+
+# File paths
+f_ebd <- "~/Spatial raptors project /ebd_US-OH_200501_202412_smp_relJan-2026/ebd_US-OH_200501_202412_smp_relJan-2026.txt"
+
+f_smp <- "~/Spatial raptors project /ebd_US-OH_200501_202412_smp_relJan-2026/ebd_US-OH_200501_202412_smp_relJan-2026_sampling.txt"
+```
+
+```{r}
+#Define Target Species
+raptor_species <- c(
+  # Accipitriformes
+  "Red-tailed Hawk", "Red-shouldered Hawk", "Broad-winged Hawk",
+  "Cooper's Hawk", "Sharp-shinned Hawk", "Northern Harrier",
+  "Rough-legged Hawk", "Bald Eagle", "Golden Eagle",
+  "Osprey",
+  # Falconiformes
+  "American Kestrel", "Merlin", "Peregrine Falcon",
+  # Cathartidae
+  "Turkey Vulture", "Black Vulture",
+  # Strigiformes
+  "Great Horned Owl", "Barred Owl", "Eastern Screech-Owl",
+  "American Barn Owl", "Short-eared Owl", "Long-eared Owl",
+  "Snowy Owl", "Northern Saw-whet Owl"
+)
+
+length(raptor_species)
+```
+
+```{r auk_filter}
+# Defining the filters
+ebd_filters <- auk_ebd(f_ebd, file_sampling = f_smp) %>%
+  auk_state("US-OH") %>%
+  auk_date(date = c("2005-01-01", "2024-12-31")) %>%
+  auk_species(raptor_species) %>%
+  auk_protocol(protocol = c("Stationary", "Traveling")) %>%
+  auk_duration(duration = c(5, 240)) %>%
+  auk_distance(distance = c(0, 8)) %>%
+  auk_complete()
+
+# Output paths
+f_ebd_out <- "data/ebd_OH_raptors_filtered.txt"
+f_smp_out <- "data/ebd_OH_raptors_sampling_filtered.txt"
+dir.create("data", showWarnings = FALSE)
+
+# Execute filter (long-running step)
+auk_filter(ebd_filters,
+           file = f_ebd_out,
+           file_sampling = f_smp_out,
+           overwrite = TRUE)
+
+```
+
+```{r}
+# Read filtered text files 
+ebd <- read_ebd(f_ebd_out)
+sampling <- read_sampling(f_smp_out)
+
+# Applying observer count filter (1-10 observers) and assigning seasonal flags
+sampling <- sampling %>%
+  filter(number_observers >= 1 & number_observers <= 10) %>%
+  mutate(
+    month_val = month(observation_date),
+    yday_val  = yday(observation_date),
+    is_breeding = (yday_val >= 121 & yday_val <= 212),  # May 1 – Jul 31
+    is_winter   = (month_val %in% c(12, 1, 2))           # Dec, Jan, Feb
+  ) %>%
+  filter(is_breeding | is_winter)
+
+# Keep only EBD records matching retained sampling checklists
+ebd <- ebd %>%
+  filter(sampling_event_identifier %in% sampling$sampling_event_identifier) #Keep only rows in ebd where the checklist ID exists in sampling
+
+head(ebd)
+head(sampling)
+```
+
+```{r}
+#Breeding subset
+samp_breeding <- sampling %>% filter(is_breeding)
+ebd_breeding  <- ebd %>%
+  filter(sampling_event_identifier %in% samp_breeding$sampling_event_identifier) 
+#Keep only bird observations that belong to breeding-season checklists.
+
+```
+
+```{r}
+# ZERO-FILL: Convert detection-only to detection/non-detection
+zf_raw <- auk_zerofill(ebd_breeding, samp_breeding, collapse = TRUE)
+
+# Force into a plain usable data frame
+if (inherits(zf_raw, "auk_zerofill")) {
+  zf_breeding <- as.data.frame(zf_raw$observations) %>%
+    left_join(as.data.frame(zf_raw$sampling_events), by = "sampling_event_identifier")
+} else if (is.data.frame(zf_raw)) {
+  zf_breeding <- as.data.frame(zf_raw)
+} else {
+  obs_df  <- as.data.frame(zf_raw[["observations"]])
+  samp_df <- as.data.frame(zf_raw[["sampling_events"]])
+  zf_breeding <- left_join(obs_df, samp_df, by = "sampling_event_identifier")
+  rm(obs_df, samp_df)
+}
+
+# Patch common_name from eBird taxonomy if missing
+if (!"common_name" %in% names(zf_breeding) && "scientific_name" %in% names(zf_breeding)) {
+  zf_breeding <- zf_breeding %>%
+    left_join(
+      auk::ebird_taxonomy %>% select(scientific_name, common_name) %>% distinct(),
+      by = "scientific_name"
+    )
+}
+
+# DERIVE ANALYTICAL VARIABLES
+zf_breeding <- zf_breeding %>%
+  mutate(
+    species_observed = as.integer(species_observed),
+    year        = year(observation_date),
+    day_of_year = yday(observation_date),
+    time_hours   = as.numeric(hms(time_observations_started)) / 3600,
+    effort_hours = duration_minutes / 60,
+    log_effort   = log(effort_hours)
+  )
+
+# Distance covariate (traveling protocol)
+if ("effort_distance_km" %in% names(zf_breeding)) {
+  zf_breeding <- zf_breeding %>% mutate(log_distance = log(effort_distance_km + 0.001))
+}
+
+# Observer skill proxy
+if ("number_species" %in% names(zf_breeding)) {
+  zf_breeding <- zf_breeding %>% mutate(n_species = number_species) #number species is Used as a proxy for observer skill
+} else {
+  zf_breeding <- zf_breeding %>% mutate(n_species = NA_real_)
+}
+
+# SAVE
+saveRDS(zf_breeding, "data/ebird_breeding_raptors.rds")
+
+```
+
+```{r}
+head(zf_breeding)
+```
+

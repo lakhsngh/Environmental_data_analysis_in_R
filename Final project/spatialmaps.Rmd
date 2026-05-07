@@ -1,0 +1,378 @@
+---
+title: "Spatial maps"
+author: "Lakhvinder Singh"
+date: "2026-05-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(sf)
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(htmltools)
+library(tigris)
+library(spdep)
+library(terra)
+library(exactextractr)
+library(leaflet)
+library(tidyr)
+```
+
+```{r}
+#Loading data
+ohio_grid   <- readRDS("data/ohio_10km_grid.rds")
+zf_breeding <- readRDS("data/ebird_breeding_raptors.rds")
+```
+
+```{r}
+# projecting ebird points to match grid crs
+zf_sf <- zf_breeding %>%
+  filter(!is.na(latitude), !is.na(longitude)) %>%
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326) %>%
+  st_transform(st_crs(ohio_grid))
+
+# assign each checklist to a grid cell
+zf_gridded <- st_join(zf_sf, ohio_grid, join = st_within) %>%
+  st_drop_geometry() %>%
+  filter(!is.na(grid_id))
+
+# count unique species (richness) per cell
+richness <- zf_gridded %>%
+  filter(species_observed == 1) %>%
+  group_by(grid_id) %>%
+  summarise(n_species = n_distinct(common_name), .groups = "drop")
+
+# join to grid
+grid_rich <- ohio_grid %>%
+  left_join(richness, by = "grid_id") %>%
+  mutate(n_species = replace_na(n_species, 0))
+
+
+head(richness)
+```
+
+```{r}
+# downloading ohio counties
+ohio_counties <- counties(state = "OH", cb = TRUE, year = 2024) %>%
+  st_transform(st_crs(ohio_grid))
+
+# joining ebird points to counties
+zf_county <- zf_sf %>%
+  st_join(ohio_counties, join = st_within) %>%
+  st_drop_geometry() %>%
+  filter(!is.na(GEOID))
+
+# count unique species (richness) per county
+county_richness <- zf_county %>%
+  filter(species_observed == 1) %>%
+  group_by(GEOID, NAME) %>%
+  summarise(n_species = n_distinct(common_name), .groups = "drop")
+
+# join back to county polygons
+ohio_counties <- ohio_counties %>%
+  left_join(county_richness, by = "GEOID")
+
+head(county_richness)
+head(ohio_counties)
+```
+```{r}
+library(vegan)
+
+# calculate detection counts per species per county
+species_counts <- zf_county %>%
+  filter(species_observed == 1) %>%
+  group_by(GEOID, common_name) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  pivot_wider(names_from = common_name, values_from = count, values_fill = 0)
+
+# calculate shannon index per county : remove the geoid column and pass it to diversity function. it applies shannon formula to each row and each county gets shannon H value. 
+shannon_vals <- species_counts %>%
+  select(-GEOID) %>%
+  diversity(index = "shannon")
+
+#Create dataframe
+shannon_df <- data.frame(
+  GEOID   = species_counts$GEOID,
+  shannon = round(shannon_vals, 3)
+)
+
+#Join back to spatial data
+ohio_counties_shannon_plot <- ohio_counties %>%
+  left_join(shannon_df, by = "GEOID")
+
+#shanon diveristy map
+ggplot(ohio_counties_shannon_plot) +
+  geom_sf(aes(fill = shannon), color = "white", linewidth = 0.3) +
+  scale_fill_viridis_c(name = "Shannon\ndiversity") +
+  labs(title = "Raptor Shannon diversity by county") +
+  theme_void(base_size = 12)
+
+ggsave("plots/county_shannon_map.png", width = 9, height = 7, dpi = 300)
+head(species_counts)
+head(shannon_df)
+```
+
+```{r}
+#Global Moran Analysis
+# projected crs for neighbor calculations
+ohio_counties_proj <- ohio_counties_shannon_plot %>%
+  st_transform(5070) %>%
+  filter(!is.na(shannon))
+ 
+# queen contiguity neighbors
+nb <- poly2nb(ohio_counties_proj, queen = TRUE)
+lw <- nb2listw(nb, style = "W", zero.policy = TRUE)
+
+```
+
+```{r}
+# global moran to see if there is spatial autocorrelation
+moran.test(ohio_counties_proj$shannon, lw, zero.policy = TRUE)
+```
+```{r}
+# local moran
+lisa_results <- localmoran(ohio_counties_proj$shannon, lw, zero.policy = TRUE)
+ohio_counties_proj$local_moran_i <- lisa_results[, 1]
+ohio_counties_proj$local_p_value <- lisa_results[, 5]
+
+# deviation of each county from the state mean
+shannon_deviation  <- ohio_counties_proj$shannon - mean(ohio_counties_proj$shannon, na.rm = TRUE)
+
+# average deviation of each county's neighbors from the state mean
+neighbor_deviation <- lag.listw(lw, shannon_deviation, zero.policy = TRUE)
+
+# assign LISA quadrants
+ohio_counties_proj$lisa_quadrant <- ifelse(shannon_deviation > 0 & neighbor_deviation > 0, "HH",
+                                    ifelse(shannon_deviation > 0 & neighbor_deviation < 0, "HL",
+                                    ifelse(shannon_deviation < 0 & neighbor_deviation > 0, "LH",
+                                    ifelse(shannon_deviation < 0 & neighbor_deviation < 0, "LL",
+                                           NA))))
+
+# mark non-significant counties
+ohio_counties_proj$lisa_quadrant[ohio_counties_proj$local_p_value > 0.05] <- "Not significant"
+
+head(lisa_results)
+```
+
+```{r}
+lisa_colors <- c(
+  "HH"              = "#d7191c",
+  "HL"              = "#fdae61",
+  "LH"              = "#abd9e9",
+  "LL"              = "#2c7bb6",
+  "Not significant" = "#e0e0e0"
+)
+
+ggplot(ohio_counties_proj) +
+  geom_sf(aes(fill = lisa_quadrant), color = "white", linewidth = 0.3) +
+  scale_fill_manual(values = lisa_colors, name = "LISA quadrant") +
+  labs(title = "LISA clusters of raptor Shannon diversity by county") +
+  theme_void(base_size = 12)
+
+```
+```{r}
+# reproject to WGS84 (EPSG 4326)
+ohio_counties_lisa_wgs <- ohio_counties_proj %>%
+  st_transform(4326)
+
+# define color for each LISA quadrant category
+pal_lisa <- colorFactor(
+  palette = c("#d7191c", "#fdae61", "#abd9e9", "#2c7bb6", "#e0e0e0"),
+  levels  = c("HH", "HL", "LH", "LL", "Not significant")
+)
+
+#popup text for each county
+popups_lisa <- sprintf(
+  "<strong>%s</strong><br/>LISA quadrant: %s<br/>p-value: %.4f",
+  ohio_counties_lisa_wgs$NAMELSAD,
+  ohio_counties_lisa_wgs$lisa_quadrant,
+  ohio_counties_lisa_wgs$local_p_value
+) %>% lapply(HTML)
+
+# Leaflet map
+leaflet(ohio_counties_lisa_wgs) %>%
+
+  #background tile options
+  addProviderTiles(providers$CartoDB.Positron,  group = "Light") %>%
+  addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") %>%
+  addProviderTiles(providers$OpenTopoMap,       group = "Topographic") %>%
+
+  #county polygons colored by LISA quadrant
+  addPolygons(
+    fillColor   = ~pal_lisa(lisa_quadrant),  # color by quadrant category
+    fillOpacity = 0.8,                        
+    color       = "white",                    
+    weight      = 0.5,                        
+    popup       = popups_lisa,                # click to show county info
+    highlightOptions = highlightOptions(
+      weight      = 2,           
+      color       = "#333",      
+      fillOpacity = 0.9,         
+      bringToFront = TRUE        
+    )
+  ) %>%
+
+  # add legend
+  addLegend(
+    pal      = pal_lisa,
+    values   = ~lisa_quadrant,
+    title    = "LISA quadrant",
+    position = "bottomright"
+  ) %>%
+
+  #layer switcher button
+  addLayersControl(
+    baseGroups = c("Light", "Satellite", "Topographic"),
+    options    = layersControlOptions(collapsed = FALSE)
+  )
+```
+
+```{r}
+#Dominant land cover type and scpecies composition map 
+
+#load NLCD raster
+nlcd <- rast("~/Spatial raptors project /Annual land cover data 2005-2024/Annual_NLCD_LndCov_2024_CU_C1V1.tif")
+
+# load ohio counties
+library(tigris)
+ohio_counties <- counties(state = "OH", cb = TRUE, year = 2024)
+
+# reproject counties to match NLCD
+ohio_counties_proj <- ohio_counties %>%
+  st_transform(crs(nlcd))
+
+# crop NLCD to ohio
+nlcd_ohio <- crop(nlcd, ext(vect(ohio_counties_proj))) #ext gets the bounding box 
+
+# extract land cover proportions per county
+ohio_counties_proj$forest_prop <- exact_extract(
+  nlcd_ohio, ohio_counties_proj,
+  fun = function(values, cov_frac) {
+    sum(cov_frac[values %in% c(41, 42, 43)], na.rm = TRUE) / sum(cov_frac)
+  })
+
+ohio_counties_proj$ag_prop <- exact_extract(
+  nlcd_ohio, ohio_counties_proj,
+  fun = function(values, cov_frac) {
+    sum(cov_frac[values %in% c(81, 82)], na.rm = TRUE) / sum(cov_frac) # 81 is hay/pasture, 82 is cultivated crop
+  })
+
+ohio_counties_proj$urban_prop <- exact_extract(
+  nlcd_ohio, ohio_counties_proj,
+  fun = function(values, cov_frac) {
+    sum(cov_frac[values %in% c(21, 22, 23, 24)], na.rm = TRUE) / sum(cov_frac)
+  })
+
+ohio_counties_proj$wetland_prop <- exact_extract(
+  nlcd_ohio, ohio_counties_proj,
+  fun = function(values, cov_frac) {
+    sum(cov_frac[values %in% c(90, 95)], na.rm = TRUE) / sum(cov_frac) #90 is woody wetland and 95 herbaceous wetland
+  })
+
+# determine dominant land cover per county
+ohio_counties_proj <- ohio_counties_proj %>%
+  rowwise() %>%
+  mutate(
+    dominant = c("Forest", "Agriculture", "Urban", "Wetland")[
+      which.max(c(forest_prop, ag_prop, urban_prop, wetland_prop))
+    ]
+  ) %>%
+  ungroup()
+
+head(ohio_counties_proj %>% st_drop_geometry() %>%
+       select(NAME, forest_prop, ag_prop, urban_prop, wetland_prop, dominant))
+```
+
+```{r}
+#Top 3 species each county
+top_species_per_county <- zf_county %>%
+  filter(species_observed == 1) %>%
+  group_by(GEOID, common_name) %>%
+  summarise(detections = n(), .groups = "drop") %>%
+  group_by(GEOID) %>%
+  arrange(desc(detections)) %>%
+  slice_head(n = 3) %>%               #three most frequenty detected species for each county
+  summarise(
+    top_species = paste0(
+      common_name, " (", detections, ")",
+      collapse = "<br/>"
+    ),
+    .groups = "drop"
+  )
+
+# join to counties
+ohio_counties_final <- ohio_counties_proj %>%
+  st_transform(4326) %>%
+  left_join(top_species_per_county, by = "GEOID")
+
+head(top_species_per_county)
+head(ohio_counties_final)
+```
+
+```{r}
+#Define colors for land-cover classes
+land_colors <- c(
+  "Forest"      = "#1d8348",   # green
+  "Agriculture" = "#f1c40f",   # yellow
+  "Urban"       = "#c0392b",   # red
+  "Wetland"     = "#2980b9"    # blue
+)
+
+pal_land <- colorFactor(
+  palette = unname(land_colors),
+  levels  = c("Forest", "Agriculture", "Urban", "Wetland"),
+  ordered = TRUE
+)
+
+popups_combined <- sprintf(
+  "<strong>%s County</strong><br/>
+   <strong>Dominant cover:</strong> %s<br/>
+   <strong>Forest:</strong> %.0f%%<br/>
+   <strong>Agriculture:</strong> %.0f%%<br/>
+   <strong>Urban:</strong> %.0f%%<br/>
+   <strong>Wetland:</strong> %.0f%%<br/><br/>
+   <strong>Top 3 raptor species:</strong><br/>%s",
+  ohio_counties_final$NAME,
+  ohio_counties_final$dominant,
+  ohio_counties_final$forest_prop * 100,
+  ohio_counties_final$ag_prop * 100,
+  ohio_counties_final$urban_prop * 100,
+  ohio_counties_final$wetland_prop * 100,
+  ifelse(is.na(ohio_counties_final$top_species),
+         "No data",
+         ohio_counties_final$top_species)
+) %>% lapply(HTML)
+
+leaflet(ohio_counties_final) %>%
+  addProviderTiles(providers$CartoDB.Positron, group = "Light") %>%
+  addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") %>%
+  addProviderTiles(providers$OpenTopoMap, group = "Topographic") %>%
+  addPolygons(
+    fillColor   = ~pal_land(dominant),
+    fillOpacity = 0.65,
+    color       = "white",
+    weight      = 1,
+    popup       = popups_combined,
+    label       = ~paste0(NAME, " — ", dominant),
+    highlightOptions = highlightOptions(
+      weight = 2, color = "#333",
+      fillOpacity = 0.85, bringToFront = TRUE
+    )
+  ) %>%
+  addLegend(
+    pal      = pal_land,
+    values   = ~dominant,
+    title    = "Dominant land cover",
+    position = "bottomright"
+  ) %>%
+  addLayersControl(
+    baseGroups = c("Light", "Satellite", "Topographic"),
+    options    = layersControlOptions(collapsed = FALSE)
+  )
+```
+

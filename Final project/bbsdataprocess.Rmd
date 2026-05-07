@@ -1,0 +1,549 @@
+---
+title: "BBS Data processing"
+author: "Lakhvinder Singh"
+date: "2026-04-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r reproducibility}
+#load libraries
+set.seed(123) #start randomness from a fixed point so results don’t change.
+library(bbsBayes2)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggrepel) #no overlap text
+library(dplyr)
+library(scales)
+```
+
+```{r}
+if (!dir.exists("data/bbs_checkpoints")) dir.create("data/bbs_checkpoints", recursive = TRUE)
+if (!dir.exists("data/bbs_models")) dir.create("data/bbs_models", recursive = TRUE)
+```
+
+```{r}
+# bbsBayes2 cache directory
+bbs_dir <- file.path(
+  path.expand("~"),
+  "Library/Application Support/org.R-project.R/R/bbsBayes2"
+)
+
+#Check if data is present; download if not
+if (!have_bbs_data(level = "state")) {
+  download_bbs_data(release = 2025)
+}
+
+print(list.files(bbs_dir))
+```
+
+```{r}
+#Load stratification map that divides regions into strata.
+strata_map <- load_map("bbs_usgs")
+
+#Filter to Ohio strata only
+ohio_strata_map <- strata_map %>% filter(grepl("^US-OH", strata_name)) #Finds rows starting with "US-OH"
+
+#Extract strata names for further analysis
+ohio_strata_names <- ohio_strata_map$strata_name
+
+head(ohio_strata_names)
+```
+
+
+```{r}
+# Target raptors for BBS analysis
+raptor_bbs_raw <- c(
+  "Red-tailed Hawk", "Red-shouldered Hawk", "Broad-winged Hawk",
+  "Cooper's Hawk", "Sharp-shinned Hawk", "Northern Harrier",
+  "Bald Eagle", "Osprey", "American Kestrel",
+  "Peregrine Falcon", "Turkey Vulture", "Black Vulture",
+  "Great Horned Owl", "Barred Owl", "Eastern Screech-Owl",
+  "American Barn Owl", "Short-eared Owl"
+)
+
+# Match each species against BBS taxonomy
+verified_species <- data.frame(
+  search_term  = character(),
+  bbs_name     = character(),
+  aou          = numeric(), #unique species identifcation number 
+  combine_flag = logical(),
+  match_type   = character(),
+  stringsAsFactors = FALSE
+)
+failed_species <- character() #species which are not matched
+
+for (sp in raptor_bbs_raw) {
+  search_term <- gsub("^American ", "", sp)
+  search_term <- gsub(" \\(.*\\)", "", search_term) #this improves matching success with bbs taxonomy
+
+  results <- tryCatch(
+    search_species(search_term),
+    error = function(e) NULL
+  )
+
+  if (is.null(results) || nrow(results) == 0) {
+    failed_species <- c(failed_species, sp)
+    next
+  }
+
+  all_forms_row <- results %>% filter(grepl("all forms", english))
+  exact_row     <- results %>% filter(english == sp)
+
+  if (nrow(all_forms_row) > 0) {
+    verified_species <- bind_rows(verified_species, data.frame(
+      search_term  = sp,
+      bbs_name     = all_forms_row$english[1],
+      aou          = all_forms_row$aou[1],
+      combine_flag = TRUE,
+      match_type   = "all_forms"
+    ))
+  } else if (nrow(exact_row) == 1) {
+    verified_species <- bind_rows(verified_species, data.frame(
+      search_term  = sp,
+      bbs_name     = exact_row$english[1],
+      aou          = exact_row$aou[1],
+      combine_flag = FALSE,
+      match_type   = "exact"
+    ))
+  } else {
+    failed_species <- c(failed_species, sp)
+  }
+}
+
+# Save verified species table
+write.csv(verified_species, "data/bbs_verified_species.csv", row.names = FALSE)
+
+print(verified_species)
+```
+
+```{r}
+# Thresholds for modelable species
+MIN_ROUTES     <- 5
+MIN_YEARS      <- 10
+MIN_DETECTIONS <- 20
+
+species_data_check <- data.frame(
+  species          = character(),
+  n_routes_ohio    = integer(),
+  n_years_ohio     = integer(),
+  total_det_ohio   = integer(),
+  passes_threshold = logical(),
+  stringsAsFactors = FALSE
+)
+
+for (i in seq_len(nrow(verified_species))) {
+  sp           <- verified_species$bbs_name[i]
+  combine_flag <- verified_species$combine_flag[i]
+
+  tryCatch({
+    bbs_sp <- stratify(by = "bbs_usgs", species = sp,
+                       combine_species_forms = combine_flag)
+
+    ohio_data   <- bbs_sp$birds_strata  %>% filter(state_num == 66, year >= 2000, year <= 2024)
+    ohio_routes <- bbs_sp$routes_strata %>% filter(state_num == 66, year >= 2000, year <= 2024)
+
+    n_routes  <- length(unique(paste(ohio_routes$state_num, ohio_routes$route)))
+    n_years   <- length(unique(ohio_data$year))
+    total_det <- sum(ohio_data$species_total, na.rm = TRUE)
+
+    species_data_check <- bind_rows(species_data_check, data.frame(
+      species          = sp,
+      n_routes_ohio    = n_routes,
+      n_years_ohio     = n_years,
+      total_det_ohio   = total_det,
+      passes_threshold = n_routes >= MIN_ROUTES & total_det >= MIN_DETECTIONS & n_years >= MIN_YEARS
+    ))
+  }, error = function(e) NULL)
+}
+
+# Split into modelable vs descriptive-only
+modelable_species <- species_data_check %>% filter(passes_threshold)
+descriptive_only  <- species_data_check %>% filter(!passes_threshold)
+
+# Save full availability table
+write.csv(species_data_check, "data/bbs_data_availability.csv", row.names = FALSE)
+
+print(species_data_check)
+```
+
+```{r}
+# Species that passed threshold and ready for modelling
+species_to_model <- verified_species %>%
+  filter(bbs_name %in% modelable_species$species)
+
+# Convergence thresholds
+RHAT_THRESHOLD <- 1.05
+ESS_THRESHOLD  <- 400
+
+convergence_log <- data.frame(
+  species       = character(),
+  model_variant = character(),
+  max_rhat      = numeric(),
+  min_ess_bulk  = numeric(),
+  converged     = logical(),
+  error_message = character(),
+  stringsAsFactors = FALSE
+)
+```
+
+```{r}
+for (i in seq_len(nrow(species_to_model))) {
+
+  sp           <- species_to_model$bbs_name[i]
+  combine_flag <- species_to_model$combine_flag[i]
+  safe_name    <- gsub("[^A-Za-z0-9]", "_", sp)
+  checkpoint_file <- paste0("data/bbs_checkpoints/trend_", safe_name, ".rds")
+
+  if (file.exists(checkpoint_file)) next #avoids rerunning models
+
+  tryCatch({
+
+    # Stratify continent-wide (required for hierarchical shrinkage)
+    bbs_sp  <- stratify(by = "bbs_usgs", species = sp,
+                        combine_species_forms = combine_flag)
+    prepped <- prepare_data(bbs_sp,
+                            min_year            = 2000,
+                            max_year            = 2024,
+                            min_n_routes        = 3,
+                            min_max_route_years = 3)
+
+    # Spatial preparation with hierarchical fallback
+    model_variant_used <- "spatial"
+    prepped_spatial <- tryCatch(
+      prepare_spatial(prepped, strata_map = strata_map),
+      error = function(e) NULL
+    )
+
+    if (!is.null(prepped_spatial)) {
+      model_prepped <- prepare_model(prepped_spatial,
+                                     model = "gamye", model_variant = "spatial")
+    } else {
+      model_prepped <- prepare_model(prepped,
+                                     model = "gamye", model_variant = "hier")
+      model_variant_used <- "hier"
+    }
+
+    # Fit model
+    model_run <- run_model(model_prepped,
+                           iter_warmup   = 1000,
+                           iter_sampling = 1000,
+                           chains        = 4,
+                           save_model    = TRUE,
+                           output_dir    = "data/bbs_models")
+
+    # Convergence diagnostics
+    conv     <- get_convergence(model_run)
+    rhat_col <- intersect(c("r_hat", "rhat", "Rhat"), names(conv))[1]
+    ess_col  <- intersect(c("ess_bulk", "ess"),        names(conv))[1]
+    max_rhat <- max(conv[[rhat_col]], na.rm = TRUE)
+    min_ess  <- min(conv[[ess_col]],  na.rm = TRUE)
+
+    convergence_log <<- bind_rows(convergence_log, data.frame(
+      species       = sp,
+      model_variant = model_variant_used,
+      max_rhat      = round(max_rhat, 4),
+      min_ess_bulk  = round(min_ess, 0),
+      converged     = max_rhat <= RHAT_THRESHOLD & min_ess >= ESS_THRESHOLD,
+      error_message = NA_character_
+    ))
+
+    # Generate indices at all region levels — posteriors aggregated correctly
+    indices_all <- generate_indices(
+      model_output = model_run,
+      regions      = c("stratum", "prov_state", "continent")
+    )
+
+    # Trends for both periods
+    trends_full  <- generate_trends(indices_all, min_year = 2000, max_year = 2024) #long term trend
+    trends_short <- generate_trends(indices_all, min_year = 2014, max_year = 2024) #short term trend
+
+    extract_trend_df <- function(tr) {
+      if (is.list(tr) && "trends" %in% names(tr)) as.data.frame(tr$trends)
+      else as.data.frame(tr)
+    }
+
+    # Filter to Ohio state row and Ohio strata
+    ohio_filter <- function(df) {
+      df %>% filter(
+        (region_type == "prov_state" & region == "US-OH") |
+        (region_type == "stratum"    & grepl("^US-OH", region))
+      )
+    }
+
+    df_full_oh  <- ohio_filter(extract_trend_df(trends_full))  %>% mutate(period = "2000-2024")
+    df_short_oh <- ohio_filter(extract_trend_df(trends_short)) %>% mutate(period = "2014-2024")
+
+    final_trend_df <- bind_rows(df_full_oh, df_short_oh) %>%
+      mutate(species = sp, model_variant = model_variant_used,
+             converged = max_rhat <= RHAT_THRESHOLD & min_ess >= ESS_THRESHOLD,
+             max_rhat = max_rhat, min_ess = min_ess)
+
+    # Extract Ohio annual indices
+    indices_df <- if (is.list(indices_all) && "indices" %in% names(indices_all))
+      as.data.frame(indices_all$indices) else as.data.frame(indices_all)
+
+    indices_ohio        <- indices_df %>% filter(region_type == "prov_state" & region == "US-OH")
+    indices_ohio_strata <- indices_df %>% filter(region_type == "stratum" & grepl("^US-OH", region))
+
+    # Save checkpoint
+    saveRDS(
+      list(
+        trends              = final_trend_df,
+        indices_ohio        = indices_ohio,
+        indices_ohio_strata = indices_ohio_strata,
+        convergence         = data.frame(max_rhat, min_ess,
+                                         converged = max_rhat <= RHAT_THRESHOLD & min_ess >= ESS_THRESHOLD,
+                                         variant   = model_variant_used)
+      ),
+      file = checkpoint_file
+    )
+
+    rm(model_run, bbs_sp, prepped, prepped_spatial, model_prepped,
+       indices_all, indices_df, indices_ohio, indices_ohio_strata,
+       trends_full, trends_short, df_full_oh, df_short_oh, final_trend_df, conv)
+
+  }, error = function(e) {
+    convergence_log <<- bind_rows(convergence_log, data.frame(
+      species       = sp,
+      model_variant = NA_character_,
+      max_rhat      = NA_real_,
+      min_ess_bulk  = NA_real_,
+      converged     = FALSE,
+      error_message = e$message
+    ))
+  })
+}
+
+# Save convergence log
+write.csv(convergence_log, "data/bbs_convergence_log.csv", row.names = FALSE)
+```
+
+```{r}
+#Verify Completed Models
+finished_files <- list.files("data/bbs_checkpoints", pattern = "\\.rds$", full.names = FALSE)
+finished_names <- gsub("trend_|\\.rds", "", finished_files)
+all_safe_names <- gsub("[^A-Za-z0-9]", "_", species_to_model$bbs_name)
+missing        <- setdiff(all_safe_names, finished_names)
+
+print(finished_files)
+```
+  
+```{r}
+#Assemble Combined Results
+# Load all checkpoint files
+all_trends         <- list()
+all_indices_ohio   <- list()
+all_indices_strata <- list()
+
+for (f in finished_files) {
+  sp_data <- readRDS(file.path("data/bbs_checkpoints", f))
+  sp_name <- sp_data$trends$species[1]
+  if (is.null(sp_name) || is.na(sp_name)) next
+
+  all_trends[[sp_name]] <- sp_data$trends
+
+  if (!is.null(sp_data$indices_ohio) && nrow(sp_data$indices_ohio) > 0)
+    all_indices_ohio[[sp_name]] <- sp_data$indices_ohio %>% mutate(species = sp_name)
+
+  if (!is.null(sp_data$indices_ohio_strata) && nrow(sp_data$indices_ohio_strata) > 0)
+    all_indices_strata[[sp_name]] <- sp_data$indices_ohio_strata %>% mutate(species = sp_name)
+}
+
+trend_summary <- bind_rows(all_trends)
+```
+ 
+```{r}
+# Derive convergence flag if missing from checkpoint
+if (!"converged" %in% names(trend_summary)) {
+  trend_summary <- trend_summary %>%
+    mutate(converged = if ("max_rhat" %in% names(.)) max_rhat < RHAT_THRESHOLD else NA)
+}
+
+# Significance and direction flags
+trend_summary <- trend_summary %>%
+  mutate(
+    significant = sign(trend_q_0.025) == sign(trend_q_0.975),
+    direction   = case_when(
+      significant & trend > 0 ~ "Significant increase",
+      significant & trend < 0 ~ "Significant decline",
+      TRUE                    ~ "No significant change"
+    )
+  )
+
+# Extract Ohio prov_state rows
+ohio_trends <- trend_summary %>%
+  filter(region_type == "prov_state" & region == "US-OH")
+
+# Fallback: route-weighted average across Ohio strata if prov_state missing
+if (nrow(ohio_trends) == 0) {
+  ohio_trends <- trend_summary %>%
+    filter(region_type == "stratum" & grepl("^US-OH", region)) %>%
+    group_by(species, period) %>%
+    summarise(
+      trend          = weighted.mean(trend,          n_routes, na.rm = TRUE),
+      trend_q_0.025  = weighted.mean(trend_q_0.025,  n_routes, na.rm = TRUE),
+      trend_q_0.975  = weighted.mean(trend_q_0.975,  n_routes, na.rm = TRUE),
+      percent_change = weighted.mean(percent_change,  n_routes, na.rm = TRUE),
+      n_strata       = n(),
+      total_routes   = sum(n_routes, na.rm = TRUE),
+      converged      = all(converged, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      region_type = "ohio_weighted",
+      region      = "US-OH",
+      significant = sign(trend_q_0.025) == sign(trend_q_0.975),
+      direction   = case_when(
+        significant & trend > 0 ~ "Significant increase",
+        significant & trend < 0 ~ "Significant decline",
+        TRUE                    ~ "No significant change"
+      )
+    )
+}
+```
+  
+```{r}
+# Bind index objects
+indices_ohio_combined        <- bind_rows(all_indices_ohio)
+indices_ohio_strata_combined <- bind_rows(all_indices_strata)
+
+# Save all outputs
+saveRDS(trend_summary,                "data/bbs_trend_summary_full.rds")
+saveRDS(ohio_trends,                  "data/bbs_trend_summary_ohio.rds")
+saveRDS(indices_ohio_combined,        "data/bbs_indices_ohio.rds")
+saveRDS(indices_ohio_strata_combined, "data/bbs_indices_ohio_strata.rds")
+write.csv(ohio_trends, "data/ohio_raptor_trends_2000_2024.csv", row.names = FALSE)
+
+head(ohio_trends)
+```
+```{r}
+checkpoint_dir <- "data/bbs_checkpoints"
+out_dir        <- "figures"
+```
+
+```{r}
+# species list and filename lookup
+ohio_raptors <- c(
+  "American Kestrel",
+  "Bald Eagle",
+  "Barred Owl",
+  "Black Vulture",
+  "Broad-winged Hawk",
+  "Cooper's Hawk",
+  "Great Horned Owl",
+  "Northern Harrier",
+  "Red-shouldered Hawk",
+  "Red-tailed Hawk",
+  "Turkey Vulture"
+)
+
+# maps display names to .rds filenames (apostrophes, spaces handled)
+file_map <- c(
+  "American Kestrel"    = "trend_American_Kestrel.rds",
+  "Bald Eagle"          = "trend_Bald_Eagle.rds",
+  "Barred Owl"          = "trend_Barred_Owl.rds",
+  "Black Vulture"       = "trend_Black_Vulture.rds",
+  "Broad-winged Hawk"   = "trend_Broad_winged_Hawk.rds",
+  "Cooper's Hawk"       = "trend_Cooper_s_Hawk.rds",
+  "Great Horned Owl"    = "trend_Great_Horned_Owl.rds",
+  "Northern Harrier"    = "trend_Northern_Harrier.rds",
+  "Red-shouldered Hawk" = "trend_Red_shouldered_Hawk.rds",
+  "Red-tailed Hawk"     = "trend_Red_tailed_Hawk__all_forms_.rds",
+  "Turkey Vulture"      = "trend_Turkey_Vulture.rds"
+)
+```
+
+```{r}
+# load each species model, filter to Ohio strata, average across strata per year
+all_indices <- lapply(ohio_raptors, function(sp) {
+  obj <- readRDS(file.path(checkpoint_dir, file_map[sp]))
+  idx <- obj$indices$indices
+
+  idx %>%
+    filter(grepl("^US-OH", region)) %>%
+    group_by(year) %>%
+    summarise(
+      index = mean(index,         na.rm = TRUE),
+      lci   = mean(index_q_0.025, na.rm = TRUE),
+      uci   = mean(index_q_0.975, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(species = sp)
+})
+
+# stack all species into one long data frame
+indices <- bind_rows(all_indices)
+head(indices)
+```
+
+```{r}
+#standardized every species to start at 1 
+indices <- indices %>%
+  group_by(species) %>%
+  mutate(
+    base    = index[year == min(year)][1],
+    index.s = index / base, #same as baseline year
+    lci.s   = lci   / base, 
+    uci.s   = uci   / base 
+  ) %>%
+  select(-base) %>%
+  ungroup()
+```
+
+```{r}
+#Colors and end-year labels
+sp_colours <- setNames(hue_pal()(length(ohio_raptors)), ohio_raptors)
+
+endyr_df <- indices %>%
+  group_by(species) %>%
+  filter(year == max(year)) %>%
+  ungroup() %>%
+  mutate(
+    pct_change = round((index.s - 1) * 100, 0),
+    label      = ifelse(pct_change >= 0,
+                        paste0("+", pct_change, "%"),
+                        paste0(pct_change, "%"))
+  )
+```
+
+```{r fig-individual, fig.width=14, fig.height=12, dpi=300}
+
+ohio_raptor_trends <- ggplot(indices, aes(x = year)) +
+  geom_blank(data = data.frame(year = 2000, index.s = 1,
+                                species = ohio_raptors),
+             aes(y = index.s)) +
+  geom_ribbon(aes(ymin = lci.s, ymax = uci.s, fill = species), alpha = 0.12) +
+  geom_line(aes(y = index.s, colour = species), linewidth = 0.75) +
+  geom_hline(yintercept = 1, linetype = "dashed",                   #baseline reference line
+             colour = "black", linewidth = 0.35) +
+  geom_text(data = endyr_df,
+            aes(x = year, y = index.s, label = label, colour = species),
+            hjust = 1.5, vjust = -1.2, size = 8, fontface = "bold") +
+  scale_colour_manual(values = sp_colours) +                        #same color for line and ribbon
+  scale_fill_manual(values = sp_colours) +
+  scale_y_continuous(labels = number_format(accuracy = 0.1)) +
+  scale_x_continuous(breaks = seq(2000, 2024, 5)) +
+  ggh4x::facet_wrap2(~ species, ncol = 3, scales = "free_y", axes = "all") +
+  labs(x = "Year (2000-2024)",
+       y = "Relative abundance index",
+       title = "Raptor population trends, 2000–2024") +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position  = "none",
+    strip.text       = element_text(size = 15), #species name panel titles
+    panel.grid.minor = element_blank(),
+    plot.title       = element_text(size = 20),
+    axis.text        = element_text(size = 15),
+    axis.title.y = element_text(size = 18),
+    axis.title.x = element_text(size = 18, margin = margin(t = 10)),
+  )
+
+ohio_raptor_trends
+
+```
+
